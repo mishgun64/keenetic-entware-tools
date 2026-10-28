@@ -8,7 +8,7 @@
 | `setup-keenetic.sh` | Роутер (Entware) | SSH-ключ, пароль root, пакеты, алиасы, cron, nfqws2-keenetic |
 | `deploy-nfqws2.ps1` | Windows (PowerShell) | Копирует `.\nfqws2` на роутер в `/opt/etc/nfqws2` |
 
-> Во всех командах замени `USER/REPO` на свои. Для воспроизводимости вместо `main` можно указать хэш коммита.
+> Для воспроизводимости вместо `refs/heads/main` в ссылке можно указать хэш коммита.
 > Скрипты выполняются от root: перед запуском по ссылке прочитай их.
 
 ## 1. Подготовка флэшки
@@ -16,7 +16,7 @@
 Linux-машина, нужны `parted`, `e2fsprogs`, `curl` или `wget`. **Все данные на устройстве будут стёрты.**
 
 ```bash
-sudo bash -c "$(curl -fsSL https://raw.githubusercontent.com/USER/REPO/main/prepare-entware-usb.sh)" _ /dev/sdX ENTWARE
+sudo bash -c "$(curl -fsSL https://github.com/mishgun64/keenetic-entware-tools/raw/refs/heads/main/prepare-entware-usb.sh)" _ /dev/sdX ENTWARE
 ```
 
 Скрипт скачивает `aarch64-installer.tar.gz` до форматирования, показывает `lsblk` и требует ввести имя устройства для подтверждения. Результат: ext4-раздел с меткой `ENTWARE` и файлом `/install/aarch64-installer.tar.gz`.
@@ -26,13 +26,13 @@ sudo bash -c "$(curl -fsSL https://raw.githubusercontent.com/USER/REPO/main/prep
 Заходишь на роутер по SSH и запускаешь:
 
 ```sh
-sh -c "$(wget -qO- https://raw.githubusercontent.com/USER/REPO/main/setup-keenetic.sh)"
+sh -c "$(wget -qO- https://github.com/mishgun64/keenetic-entware-tools/raw/refs/heads/main/setup-keenetic.sh)"
 ```
 
 или через curl:
 
 ```sh
-sh -c "$(curl -fsSL https://raw.githubusercontent.com/USER/REPO/main/setup-keenetic.sh)"
+sh -c "$(curl -fsSL https://github.com/mishgun64/keenetic-entware-tools/raw/refs/heads/main/setup-keenetic.sh)"
 ```
 
 Форма `sh -c "$(...)"` нужна, чтобы stdin остался терминалом: скрипт спрашивает, менять ли пароль root, и вызывает `passwd`. Через `| sh` это не сработает.

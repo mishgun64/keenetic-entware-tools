@@ -23,25 +23,14 @@ sudo bash -c "$(curl -fsSL https://github.com/mishgun64/keenetic-entware-tools/r
 
 ## 2. Первичная настройка роутера
 
-Заходишь на роутер по SSH и запускаешь:
+Заходишь на роутер по SSH, ставишь curl и запускаешь:
 
 ```sh
-sh -c "$(wget -qO- https://github.com/mishgun64/keenetic-entware-tools/raw/refs/heads/main/setup-entware.sh)"
-```
-
-или через curl:
-
-```sh
+opkg update && opkg install curl
 sh -c "$(curl -fsSL https://github.com/mishgun64/keenetic-entware-tools/raw/refs/heads/main/setup-entware.sh)"
 ```
 
 Форма `sh -c "$(...)"` нужна, чтобы stdin остался терминалом: скрипт спрашивает, менять ли пароль root, и вызывает `passwd`. Через `| sh` это не сработает.
-
-Если HTTPS не работает (нет `wget-ssl`):
-
-```sh
-opkg update && opkg install ca-certificates wget-ssl
-```
 
 Что делает скрипт:
 

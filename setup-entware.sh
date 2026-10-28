@@ -42,7 +42,7 @@ PROFILE="${HOME:-/opt/root}/.profile"
 mkdir -p "$(dirname "$PROFILE")"
 touch "$PROFILE"
 grep -qxF "alias v='nvim'" "$PROFILE" || echo "alias v='nvim'" >> "$PROFILE"
-grep -qxF "alias ll='ls -lh'" "$PROFILE" || echo "alias ll='ls -lh'" >> "$PROFILE"
+grep -qxF "alias ll='ls -lh'" "$PROFILE" || echo "alias ll='ls -lah'" >> "$PROFILE"
 
 # 5. Cron: ежедневный opkg upgrade
 log "Cron daily opkg-upgrade"

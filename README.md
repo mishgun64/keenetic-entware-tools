@@ -5,7 +5,7 @@
 | Скрипт | Где запускается | Что делает |
 |---|---|---|
 | `prepare-entware-usb.sh` | Linux-ПК | Форматирует флэшку в ext4, кладёт Entware-инсталлятор в `/install` |
-| `setup-keenetic.sh` | Роутер (Entware) | SSH-ключ, пароль root, пакеты, алиасы, cron, nfqws2-keenetic |
+| `setup-entware.sh` | Роутер (Entware) | SSH-ключ, пароль root, пакеты, алиасы, cron, nfqws2-keenetic |
 | `deploy-nfqws2.ps1` | Windows (PowerShell) | Копирует `.\nfqws2` на роутер в `/opt/etc/nfqws2` |
 
 > Для воспроизводимости вместо `refs/heads/main` в ссылке можно указать хэш коммита.
@@ -26,13 +26,13 @@ sudo bash -c "$(curl -fsSL https://github.com/mishgun64/keenetic-entware-tools/r
 Заходишь на роутер по SSH и запускаешь:
 
 ```sh
-sh -c "$(wget -qO- https://github.com/mishgun64/keenetic-entware-tools/raw/refs/heads/main/setup-keenetic.sh)"
+sh -c "$(wget -qO- https://github.com/mishgun64/keenetic-entware-tools/raw/refs/heads/main/setup-entware.sh)"
 ```
 
 или через curl:
 
 ```sh
-sh -c "$(curl -fsSL https://github.com/mishgun64/keenetic-entware-tools/raw/refs/heads/main/setup-keenetic.sh)"
+sh -c "$(curl -fsSL https://github.com/mishgun64/keenetic-entware-tools/raw/refs/heads/main/setup-entware.sh)"
 ```
 
 Форма `sh -c "$(...)"` нужна, чтобы stdin остался терминалом: скрипт спрашивает, менять ли пароль root, и вызывает `passwd`. Через `| sh` это не сработает.
@@ -60,7 +60,7 @@ opkg update && opkg install ca-certificates wget-ssl
 .
 ├── README.md
 ├── prepare-entware-usb.sh
-├── setup-keenetic.sh
+├── setup-entware.sh
 ├── deploy-nfqws2.ps1
 └── nfqws2/            # конфигурация nfqws2
 ```

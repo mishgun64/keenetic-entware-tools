@@ -6,7 +6,7 @@
 |---|---|---|
 | `prepare-entware-usb.sh` | Linux-ПК | Форматирует флэшку в ext4, кладёт Entware-инсталлятор в `/install` |
 | `setup-keenetic.sh` | Роутер (Entware) | SSH-ключ, пароль root, пакеты, алиасы, cron, nfqws2-keenetic |
-| `deploy-nfqws2.sh` | Linux/WSL/Git Bash | Копирует `./nfqws2` на роутер в `/opt/etc/nfqws2` |
+| `deploy-nfqws2.ps1` | Windows (PowerShell) | Копирует `.\nfqws2` на роутер в `/opt/etc/nfqws2` |
 
 > Во всех командах замени `USER/REPO` на свои. Для воспроизводимости вместо `main` можно указать хэш коммита.
 > Скрипты выполняются от root: перед запуском по ссылке прочитай их.
@@ -16,16 +16,10 @@
 Linux-машина, нужны `parted`, `e2fsprogs`, `curl` или `wget`. **Все данные на устройстве будут стёрты.**
 
 ```bash
-sudo bash -c "$(curl -fsSL https://raw.githubusercontent.com/USER/REPO/main/prepare-entware-usb.sh)" _ /dev/sdX
+sudo bash -c "$(curl -fsSL https://raw.githubusercontent.com/USER/REPO/main/prepare-entware-usb.sh)" _ /dev/sdX ENTWARE
 ```
 
-Необязательный второй аргумент это метка раздела (по умолчанию `ENTWARE`):
-
-```bash
-sudo bash -c "$(curl -fsSL https://raw.githubusercontent.com/USER/REPO/main/prepare-entware-usb.sh)" _ /dev/sdX MYUSB
-```
-
-Скрипт скачивает `aarch64-installer.tar.gz` до форматирования, показывает `lsblk` и требует ввести имя устройства для подтверждения. Результат: ext4-раздел с `/install/aarch64-installer.tar.gz`.
+Скрипт скачивает `aarch64-installer.tar.gz` до форматирования, показывает `lsblk` и требует ввести имя устройства для подтверждения. Результат: ext4-раздел с меткой `ENTWARE` и файлом `/install/aarch64-installer.tar.gz`.
 
 ## 2. Первичная настройка роутера
 
@@ -60,36 +54,6 @@ opkg update && opkg install ca-certificates wget-ssl
 
 Перед использованием замени в скрипте `SSH_KEY` на свой публичный ключ.
 
-## 3. Доставка конфигурации nfqws2
-
-Запускается на ПК из каталога, где лежит папка `./nfqws2`. Копирование идёт через `scp -O` (у dropbear на Keenetic нет sftp-server).
-
-```bash
-curl -fsSL https://raw.githubusercontent.com/USER/REPO/main/deploy-nfqws2.sh | bash
-```
-
-С перезапуском nfqws2 после копирования:
-
-```bash
-curl -fsSL https://raw.githubusercontent.com/USER/REPO/main/deploy-nfqws2.sh | bash -s -- --restart
-```
-
-С параметрами (переменные окружения ставятся **после** пайпа, перед `bash`):
-
-```bash
-curl -fsSL https://raw.githubusercontent.com/USER/REPO/main/deploy-nfqws2.sh | ROUTER_HOST=192.168.1.1 ROUTER_PORT=22 bash -s -- --restart
-```
-
-| Переменная | По умолчанию |
-|---|---|
-| `ROUTER_HOST` | `192.168.1.1` |
-| `ROUTER_PORT` | `22` |
-| `ROUTER_USER` | `root` |
-| `LOCAL_DIR` | `./nfqws2` |
-| `REMOTE_DIR` | `/opt/etc/nfqws2` |
-
-Перед копированием текущая конфигурация на роутере сохраняется в `/opt/etc/nfqws2.bak`. Файлы, которых нет локально, на роутере не удаляются.
-
 ## Структура репозитория
 
 ```
@@ -97,6 +61,6 @@ curl -fsSL https://raw.githubusercontent.com/USER/REPO/main/deploy-nfqws2.sh | R
 ├── README.md
 ├── prepare-entware-usb.sh
 ├── setup-keenetic.sh
-├── deploy-nfqws2.sh
-└── nfqws2/            # твоя конфигурация nfqws2
+├── deploy-nfqws2.ps1
+└── nfqws2/            # конфигурация nfqws2
 ```

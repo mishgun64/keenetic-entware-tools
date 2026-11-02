@@ -100,8 +100,13 @@ function New-GroupName {
 # --- lists ---
 Write-Host 'Downloading lists from GitHub...'
 $api = Invoke-RestMethod $ListsApi -Headers @{ 'User-Agent' = 'add-domain-lists' }
-# PS 5.1 returns the JSON array as a single object, so enumerate it explicitly
-$listing = @(foreach ($e in @($api)) { if ($e.type -eq 'file' -and $e.name -like '*.txt') { $e } })
+# PS 5.1 may return the JSON array wrapped in extra array levels, so flatten it fully
+function Expand-Items($x) {
+    foreach ($i in $x) {
+        if ($i -is [System.Array]) { Expand-Items $i } else { $i }
+    }
+}
+$listing = @(Expand-Items $api | Where-Object { $_.type -eq 'file' -and $_.name -like '*.txt' })
 if (-not $listing) { throw "No .txt files found at $ListsApi" }
 
 $ipv4Re = '^\d{1,3}(\.\d{1,3}){3}(/\d{1,2})?$'
@@ -112,7 +117,7 @@ foreach ($entry in $listing) {
     $baseName = [IO.Path]::GetFileNameWithoutExtension($entry.name)
     # telegram_ipv4.txt -> description "telegram"
     $desc = $baseName -replace '_ipv[46]$', ''
-    $resp = Invoke-WebRequest $entry.download_url -UseBasicParsing
+    $resp = Invoke-WebRequest ([string]$entry.download_url) -UseBasicParsing
     $text = [Text.Encoding]::UTF8.GetString($resp.RawContentStream.ToArray()).TrimStart([char]0xFEFF)
     $items = @(($text -split '\r?\n') |
         ForEach-Object { ($_ -replace '#.*$', '').Trim().ToLower() } |

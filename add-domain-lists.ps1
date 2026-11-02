@@ -1,9 +1,10 @@
 #Requires -Version 5.1
 $ErrorActionPreference = 'Stop'
 
-$ScriptDir = $PSScriptRoot
-if (-not $ScriptDir) { $ScriptDir = (Get-Location).Path }
-$ListDir = Join-Path $ScriptDir 'domain-lists'
+[Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12
+
+# lists are downloaded from this folder of the GitHub repo
+$ListsApi = 'https://api.github.com/repos/mishgun64/keenetic-entware-tools/contents/domain-lists?ref=main'
 
 # --- input ---
 $routers = @(
@@ -97,17 +98,22 @@ function New-GroupName {
 }
 
 # --- lists ---
-$files = Get-ChildItem -Path $ListDir -Filter *.txt -File
-if (-not $files) { throw "No .txt files in $ListDir" }
+Write-Host 'Downloading lists from GitHub...'
+$listing = @(Invoke-RestMethod $ListsApi -Headers @{ 'User-Agent' = 'add-domain-lists' } |
+    Where-Object { $_.type -eq 'file' -and $_.name -like '*.txt' })
+if (-not $listing) { throw "No .txt files found at $ListsApi" }
 
 $ipv4Re = '^\d{1,3}(\.\d{1,3}){3}(/\d{1,2})?$'
 $ipv6Re = '^[0-9a-f]*:[0-9a-f:\.]*(/\d{1,3})?$'
 $domRe  = '^[a-z0-9]([a-z0-9\-\.]*[a-z0-9])?$'
 
-foreach ($f in $files) {
+foreach ($entry in $listing) {
+    $baseName = [IO.Path]::GetFileNameWithoutExtension($entry.name)
     # telegram_ipv4.txt -> description "telegram"
-    $desc = $f.BaseName -replace '_ipv[46]$', ''
-    $items = @(Get-Content -LiteralPath $f.FullName -Encoding UTF8 |
+    $desc = $baseName -replace '_ipv[46]$', ''
+    $resp = Invoke-WebRequest $entry.download_url -UseBasicParsing
+    $text = [Text.Encoding]::UTF8.GetString($resp.RawContentStream.ToArray()).TrimStart([char]0xFEFF)
+    $items = @(($text -split '\r?\n') |
         ForEach-Object { ($_ -replace '#.*$', '').Trim().ToLower() } |
         Where-Object { $_ } |
         ForEach-Object { ($_ -split '\s+')[-1] } |
@@ -120,7 +126,7 @@ foreach ($f in $files) {
     if ($byDesc.ContainsKey($desc)) { $name = $byDesc[$desc]; $state = 'update' }
     else { $name = New-GroupName; $state = 'new'; $byDesc[$desc] = $name }
 
-    Write-Host ("[{0}] {1} ({2}), entries: {3}" -f $f.BaseName, $name, $state, $items.Count)
+    Write-Host ("[{0}] {1} ({2}), entries: {3}" -f $baseName, $name, $state, $items.Count)
 
     $errors = 0
     for ($i = 0; $i -lt $items.Count; $i += 80) {

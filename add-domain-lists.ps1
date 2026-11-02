@@ -99,8 +99,9 @@ function New-GroupName {
 
 # --- lists ---
 Write-Host 'Downloading lists from GitHub...'
-$listing = @(Invoke-RestMethod $ListsApi -Headers @{ 'User-Agent' = 'add-domain-lists' } |
-    Where-Object { $_.type -eq 'file' -and $_.name -like '*.txt' })
+$api = Invoke-RestMethod $ListsApi -Headers @{ 'User-Agent' = 'add-domain-lists' }
+# PS 5.1 returns the JSON array as a single object, so enumerate it explicitly
+$listing = @(foreach ($e in @($api)) { if ($e.type -eq 'file' -and $e.name -like '*.txt') { $e } })
 if (-not $listing) { throw "No .txt files found at $ListsApi" }
 
 $ipv4Re = '^\d{1,3}(\.\d{1,3}){3}(/\d{1,2})?$'

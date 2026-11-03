@@ -134,6 +134,21 @@ function Get-LiveUpstreams {
     return $live
 }
 
+# reads an interface block again and returns its lines (trimmed)
+function Get-IfaceLines([string]$name) {
+    $cfg = Invoke-RestMethod "$base/rci/show/running-config" -WebSession $sess
+    $lines = @()
+    $in = $false
+    foreach ($line in $cfg.message) {
+        if ($line -match '^\S') {
+            $in = ($line -match ('^interface\s+' + [regex]::Escape($name) + '\s*$'))
+            continue
+        }
+        if ($in) { $lines += $line.Trim() }
+    }
+    return $lines
+}
+
 # Removal spelling differs between KeeneticOS builds, so several are tried.
 # Both the "enter block then no ..." and the one-line "dns-proxy no ..." forms are used.
 # Success is judged by re-reading the config, because RCI statuses do not line up with
@@ -242,6 +257,48 @@ if ($dohSelected.Count -gt 0) {
         }
     }
     Write-Host ("  DNS servers now: {0}" -f (($live -join '; ') -replace '\s+', ' '))
+}
+
+# --- provider DNS ("ip no name-servers" on the ISP/WAN interface) ---
+# the interface created by "rename ISP" is looked up by its rename target,
+# falling back to its factory name
+$ifaceNames = @()
+foreach ($line in $rc.message) {
+    if ($line -match '^interface\s+(\S+)') { $ifaceNames += $Matches[1] }
+}
+$ispIface = $null
+if ($ifaceNames -contains 'ISP') { $ispIface = 'ISP' }
+else {
+    $cur = $null
+    foreach ($line in $rc.message) {
+        if ($line -match '^interface\s+(\S+)') { $cur = $Matches[1]; continue }
+        if ($cur -and $line -match '^\s+rename\s+ISP\s*$') { $ispIface = $cur; break }
+        if ($line -match '^\S') { $cur = $null }
+    }
+}
+
+Write-Host ''
+if (-not $ispIface) {
+    Write-Warning 'Interface ISP (rename ISP) not found, skipping provider DNS disable.'
+}
+elseif (@(Get-LiveUpstreams).Count -eq 0) {
+    # without a working upstream disabling the provider DNS would leave the router
+    # without a resolver, so this step is only done together with DoH
+    Write-Warning ("No DoH upstream configured, keeping provider DNS on {0}." -f $ispIface)
+}
+else {
+    $ispLines = @(Get-IfaceLines $ispIface)
+    if ($ispLines -contains 'ip no name-servers') {
+        Write-Host ("Provider DNS already disabled on {0}." -f $ispIface)
+    }
+    else {
+        Write-Host ("Disabling provider DNS on {0} (ip no name-servers)..." -f $ispIface)
+        $null = Invoke-Rci @("interface $ispIface", 'ip no name-servers', 'exit')
+        if (-not (@(Get-IfaceLines $ispIface) -contains 'ip no name-servers')) {
+            throw ("Could not disable provider DNS on '{0}', aborting. Configuration NOT saved." -f $ispIface)
+        }
+        Write-Host '  ok'
+    }
 }
 
 # --- lists ---

@@ -259,13 +259,14 @@ if ($dohSelected.Count -gt 0) {
     Write-Host ("  DNS servers now: {0}" -f (($live -join '; ') -replace '\s+', ' '))
 }
 
-# --- provider DNS ("ip no name-servers" on the ISP/WAN interface) ---
-# the interface created by "rename ISP" is looked up by its rename target,
-# falling back to its factory name
+# --- provider DNS ("ip no name-servers" on WAN interfaces) ---
+# Targets: the interface created by "rename ISP" (falling back to its factory name)
+# and the PPPoE interface. Non-existent interfaces are skipped with a warning.
 $ifaceNames = @()
 foreach ($line in $rc.message) {
     if ($line -match '^interface\s+(\S+)') { $ifaceNames += $Matches[1] }
 }
+
 $ispIface = $null
 if ($ifaceNames -contains 'ISP') { $ispIface = 'ISP' }
 else {
@@ -277,25 +278,42 @@ else {
     }
 }
 
+$pppoeIface = $null
+foreach ($n in $ifaceNames) {
+    if ($n -match '^PPPoE\d*$') { $pppoeIface = $n; break }
+}
+
+$dnsTargets = @()
+if ($ispIface)   { $dnsTargets += $ispIface }
+if ($pppoeIface -and $dnsTargets -notcontains $pppoeIface) { $dnsTargets += $pppoeIface }
+
 Write-Host ''
 if (-not $ispIface) {
-    Write-Warning 'Interface ISP (rename ISP) not found, skipping provider DNS disable.'
+    Write-Warning 'Interface ISP (rename ISP) not found, skipping provider DNS disable on it.'
+}
+if (-not $pppoeIface) {
+    Write-Warning 'Interface PPPoE0 not found, skipping provider DNS disable on it.'
+}
+
+if ($dnsTargets.Count -eq 0) {
+    Write-Warning 'No WAN interface found, provider DNS left as is.'
 }
 elseif (@(Get-LiveUpstreams).Count -eq 0) {
     # without a working upstream disabling the provider DNS would leave the router
     # without a resolver, so this step is only done together with DoH
-    Write-Warning ("No DoH upstream configured, keeping provider DNS on {0}." -f $ispIface)
+    Write-Warning ("No DoH upstream configured, keeping provider DNS on {0}." -f ($dnsTargets -join ', '))
 }
 else {
-    $ispLines = @(Get-IfaceLines $ispIface)
-    if ($ispLines -contains 'ip no name-servers') {
-        Write-Host ("Provider DNS already disabled on {0}." -f $ispIface)
-    }
-    else {
-        Write-Host ("Disabling provider DNS on {0} (ip no name-servers)..." -f $ispIface)
-        $null = Invoke-Rci @("interface $ispIface", 'ip no name-servers', 'exit')
-        if (-not (@(Get-IfaceLines $ispIface) -contains 'ip no name-servers')) {
-            throw ("Could not disable provider DNS on '{0}', aborting. Configuration NOT saved." -f $ispIface)
+    foreach ($ifaceName in $dnsTargets) {
+        $ifaceLines = @(Get-IfaceLines $ifaceName)
+        if ($ifaceLines -contains 'ip no name-servers') {
+            Write-Host ("Provider DNS already disabled on {0}." -f $ifaceName)
+            continue
+        }
+        Write-Host ("Disabling provider DNS on {0} (ip no name-servers)..." -f $ifaceName)
+        $null = Invoke-Rci @("interface $ifaceName", 'ip no name-servers', 'exit')
+        if (-not (@(Get-IfaceLines $ifaceName) -contains 'ip no name-servers')) {
+            throw ("Could not disable provider DNS on '{0}', aborting. Configuration NOT saved." -f $ifaceName)
         }
         Write-Host '  ok'
     }

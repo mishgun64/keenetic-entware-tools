@@ -30,6 +30,14 @@ $pass = [System.Net.NetworkCredential]::new('', $sec).Password
 $base = "http://$ip"
 $sess = New-Object Microsoft.PowerShell.Commands.WebRequestSession
 
+# PS 5.1 decodes JSON as Latin-1 when the response has no charset, so UTF-8 is decoded manually
+try { [Console]::OutputEncoding = [Text.Encoding]::UTF8 } catch { }
+function Get-Utf8Json([string]$path) {
+    $resp = Invoke-WebRequest "$base$path" -WebSession $sess -UseBasicParsing
+    $text = [Text.Encoding]::UTF8.GetString($resp.RawContentStream.ToArray()).TrimStart([char]0xFEFF)
+    return ($text | ConvertFrom-Json)
+}
+
 function Get-Hdr($err, $name) {
     $h = $err.Exception.Response.Headers
     if ($h -is [System.Net.WebHeaderCollection]) { return $h[$name] }
@@ -62,22 +70,37 @@ if ($needAuth) {
 # --- interface selection (after login, so the router can list its interfaces) ---
 $ifaceChoices = @()
 $ifaceDescr = @{}
+$ifaceText = @{}
 try {
-    $ifaceInfo = Invoke-RestMethod "$base/rci/show/interface" -WebSession $sess
+    $ifaceInfo = Get-Utf8Json '/rci/show/interface'
     foreach ($p in $ifaceInfo.PSObject.Properties) {
-        if (-not $p.Name -or $p.Name -like '*/*') { continue }
+        # skip nested subtrees (name/subname) and pure numbers (ports are not VPN interfaces)
+        if (-not $p.Name -or $p.Name -like '*/*' -or $p.Name -match '^\d+$') { continue }
         $ifaceChoices += $p.Name
-        if ($p.Value -and $p.Value.description) { $ifaceDescr[$p.Name] = [string]$p.Value.description }
+        $text = $p.Name
+        if ($p.Value) {
+            if ($p.Value.description) {
+                $ifaceDescr[$p.Name] = [string]$p.Value.description
+                $text += ' ' + $p.Value.description
+            }
+            # "awg" may sit in any field (description, comment, ...), so scan the whole object
+            try { $text += ' ' + ($p.Value | ConvertTo-Json -Depth 3 -Compress) } catch { }
+        }
+        $ifaceText[$p.Name] = $text
     }
     $ifaceChoices = @($ifaceChoices | Sort-Object -Unique)
 } catch {
     Write-Warning "Could not read the interface list: $($_.Exception.Message)"
 }
 
-# an interface whose name or description contains "awg" (AmneziaWG, e.g. Wireguard2 "public-awg")
-# is offered as the default
-$defaultIface = @($ifaceChoices | Where-Object { $_ -match 'awg' -or ($ifaceDescr.ContainsKey($_) -and $ifaceDescr[$_] -match 'awg') }) |
-    Select-Object -First 1
+# an interface with "awg" anywhere in its name/fields (AmneziaWG, e.g. Wireguard2 "public-awg")
+# is used as the default
+$defaultIface = @($ifaceChoices | Where-Object { $ifaceText[$_] -match 'awg' }) | Select-Object -First 1
+$defaultLabel = ''
+if ($defaultIface) {
+    $defaultLabel = $defaultIface
+    if ($ifaceDescr.ContainsKey($defaultIface)) { $defaultLabel += " ($($ifaceDescr[$defaultIface]))" }
+}
 
 if ($ifaceChoices.Count -gt 0) {
     Write-Host ''
@@ -86,19 +109,24 @@ if ($ifaceChoices.Count -gt 0) {
         $d = ''
         if ($ifaceDescr.ContainsKey($n)) { $d = "  ($($ifaceDescr[$n]))" }
         $m = ''
-        if ($defaultIface -and $n -eq $defaultIface) { $m = '  <- default' }
+        if ($n -eq $defaultIface) { $m = '  <- default' }
         Write-Host ("  {0}{1}{2}" -f $n, $d, $m)
     }
 }
 
 if ($defaultIface) {
-    $iface = (Read-Host "VPN interface to route all lists through, e.g. $defaultIface (Enter = $defaultIface)").Trim()
+    Write-Host ''
+    Write-Host "Default interface (name or description contains 'awg'): $defaultLabel"
+    $iface = (Read-Host "VPN interface to route all lists through, e.g. $defaultLabel (Enter = $defaultLabel)").Trim()
     if (-not $iface) { $iface = $defaultIface }
 }
 else {
     $iface = (Read-Host 'VPN interface to route all lists through, e.g. Wireguard2 (Enter = do not assign routes)').Trim()
 }
-if ($iface) { Write-Host "Interface for DNS routes: $iface" }
+if ($iface) {
+    if ($ifaceDescr.ContainsKey($iface)) { Write-Host "Interface for DNS routes: $iface ($($ifaceDescr[$iface]))" }
+    else { Write-Host "Interface for DNS routes: $iface" }
+}
 
 # Sends commands in one request (context is kept between them). Returns number of failed commands.
 function Invoke-Rci([string[]]$cmds) {

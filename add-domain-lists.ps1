@@ -74,8 +74,10 @@ try {
     Write-Warning "Could not read the interface list: $($_.Exception.Message)"
 }
 
-# an interface with "awg" in its name (AmneziaWG) is offered as the default
-$defaultIface = @($ifaceChoices | Where-Object { $_ -match 'awg' }) | Select-Object -First 1
+# an interface whose name or description contains "awg" (AmneziaWG, e.g. Wireguard2 "public-awg")
+# is offered as the default
+$defaultIface = @($ifaceChoices | Where-Object { $_ -match 'awg' -or ($ifaceDescr.ContainsKey($_) -and $ifaceDescr[$_] -match 'awg') }) |
+    Select-Object -First 1
 
 if ($ifaceChoices.Count -gt 0) {
     Write-Host ''

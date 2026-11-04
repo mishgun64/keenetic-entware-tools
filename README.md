@@ -2,12 +2,13 @@
 
 Набор скриптов для Keenetic + Entware (aarch64): подготовка флэшки, первичная настройка роутера, установка nfqws2, доставка его конфигурации и загрузка списков доменов для маршрутизации через VPN.
 
-| Скрипт | Где запускается | Что делает |
-|---|---|---|
-| `prepare-entware-usb.sh` | Linux-ПК | Форматирует флэшку в ext4, кладёт Entware-инсталлятор в `/install` |
-| `setup-entware.sh` | Роутер (Entware) | SSH-ключ, пароль root, пакеты, алиасы, cron, nfqws2-keenetic |
-| `deploy-nfqws2.ps1` | Windows (PowerShell) | Копирует `.\nfqws2` на роутер в `/opt/etc/nfqws2` |
-| `add-domain-lists.ps1` | Windows (PowerShell) | Загружает списки из `.\domain-lists` в `object-group fqdn` роутера, назначает маршрут через VPN, прописывает DNS-серверы DoH и отключает DNS провайдера на ISP и PPPoE |
+| Скрипт                   | Где запускается      | Что делает                                                                                                                                                             |
+|--------------------------|----------------------|------------------------------------------------------------------------------------------------------------------------------------------------------------------------|
+| `prepare-entware-usb.sh` | Linux-ПК             | Форматирует флэшку в ext4, кладёт Entware-инсталлятор в `/install`                                                                                                     |
+| `setup-entware.sh`       | Роутер (Entware)     | SSH-ключ, пароль root, пакеты, алиасы, cron, nfqws2-keenetic                                                                                                           |
+| `deploy-nfqws2.ps1`      | Windows (PowerShell) | Копирует `.\nfqws2` на роутер в `/opt/etc/nfqws2`                                                                                                                      |
+| `add-domain-lists.ps1`   | Windows (PowerShell) | Загружает списки из `.\domain-lists` в `object-group fqdn` роутера, назначает маршрут через VPN, прописывает DNS-серверы DoH и отключает DNS провайдера на ISP и PPPoE |
+| `wg-manager.ps1`         | Windows (PowerShell) | Локально генерирует и ведёт конфиги WireGuard (сервер + клиенты) в `./<имя>`                                                                                            |
 
 > Для воспроизводимости вместо `refs/heads/main` в ссылке можно указать хэш коммита.
 > Скрипты выполняются от root: перед запуском по ссылке прочитай их.
@@ -80,13 +81,13 @@ sh -c "$(curl -fsSL https://github.com/mishgun64/keenetic-entware-tools/raw/refs
 
 Скрипт предлагает меню и прописывает выбранные серверы в секцию `dns-proxy` роутера:
 
-| № | Сервер | Адрес |
-|---|---|---|
-| 1 | quad9 | `https://dns.quad9.net/dns-query` |
-| 2 | google | `https://dns.google/dns-query` |
+| № | Сервер     | Адрес                                  |
+|---|------------|----------------------------------------|
+| 1 | quad9      | `https://dns.quad9.net/dns-query`      |
+| 2 | google     | `https://dns.google/dns-query`         |
 | 3 | cloudflare | `https://cloudflare-dns.com/dns-query` |
-| 4 | все сразу | 1, 2, 3 |
-| 5 | пропустить | Enter |
+| 4 | все сразу  | 1, 2, 3                                |
+| 5 | пропустить | Enter                                  |
 
 Ввод принимает номер, список через запятую/пробел (`1,3`), `4`/`all` или пустое значение.
 
@@ -113,6 +114,52 @@ sh -c "$(curl -fsSL https://github.com/mishgun64/keenetic-entware-tools/raw/refs
 - Отключение выполняется **только** при наличии хотя бы одного DoH-upstream: без рабочего резолвера роутер остался бы без DNS, поэтому в этом случае шаг пропускается с предупреждением.
 - Если команда не применилась на существующем интерфейсе — остановка без сохранения конфигурации.
 
+## 4. Конфиги WireGuard
+
+`wg-manager.ps1` создаёт и ведёт конфигурации WireGuard **локально**: серверный `server.conf` с пирами клиентов и по файлу `clients/<имя>.conf` на каждого клиента. На роутер и на VPN-сервер он ничего не применяет — готовый `server.conf` выкладывается отдельно.
+
+Нужен `wg.exe` (WireGuard for Windows) в `PATH` — либо путь в `-WgPath`. Файлы пишутся **в текущий каталог**, в подпапку с именем сервера:
+
+```
+<текущий каталог>/
+└── home/                    # имя сервера (аргумент <server>)
+    ├── server.conf          # серверный конфиг, [Peer] на каждого клиента
+    └── clients/
+        ├── ivan.conf
+        └── oleg.conf
+```
+
+Побочных `.json` и `server.base.conf` нет: параметры профиля (endpoint, DNS, AllowedIPs клиентов) хранятся комментариями `# wg-manager: …` в `server.conf`, а клиент считается включённым, пока его блок `[Peer]` есть в `server.conf`.
+
+Запуск одной строкой (без клонирования репозитория, из нужного каталога):
+
+```powershell
+& ([scriptblock]::Create((irm https://github.com/mishgun64/keenetic-entware-tools/raw/refs/heads/main/wg-manager.ps1))) server init home -Endpoint vpn.example.com:51820
+```
+
+С параметрами конкретной операции:
+
+```powershell
+& ([scriptblock]::Create((irm https://github.com/mishgun64/keenetic-entware-tools/raw/refs/heads/main/wg-manager.ps1))) client add home ivan
+```
+
+Команды:
+
+| Команда | Что делает |
+|---|---|
+| `server init <server> -Endpoint host:port` | Создаёт `./<server>/server.conf` (ключи генерирует `wg genkey`/`pubkey`) |
+| `client add <server> <client>` | Новый клиент: ключи, PSK, свободный IP из подсети сервера, `clients/<client>.conf`, пир в `server.conf` |
+| `client list <server>` | Таблица клиентов: имя, адрес, Enabled/Disabled |
+| `client show <server> <client>` | Показывает клиентский конфиг и его статус |
+| `client export <server> <client>` | Печатает полный путь к файлу клиента |
+| `client qr <server> <client>` | Рисует QR-код конфига (нужен `qrencode`) |
+| `client disable` / `client enable` | Убирает/возвращает блок `[Peer]` клиента в `server.conf` |
+| `client remove <server> <client>` | Удаляет клиента (с подтверждением `YES`) |
+
+Параметры `server init`: `-Address 10.10.0.1/24`, `-ListenPort 51820`, `-DNS 1.1.1.1`, `-ClientAllowedIPs "0.0.0.0/0, ::/0"`. Адрес клиента выдаётся автоматически из подсети сервера (поддерживаются IPv4-префиксы `/16`–`/30`). Каталог хранения можно переопределить через `-Root`, путь к `wg.exe` — через `-WgPath`.
+
+Перед каждой перезаписью `server.conf` рядом сохраняется резервная копия `server.conf.<дата>-<время>.bak`.
+
 ## Структура репозитория
 
 ```
@@ -122,6 +169,7 @@ sh -c "$(curl -fsSL https://github.com/mishgun64/keenetic-entware-tools/raw/refs
 ├── setup-entware.sh
 ├── deploy-nfqws2.ps1
 ├── add-domain-lists.ps1
+├── wg-manager.ps1
 ├── domain-lists/      # списки доменов и подсетей (*.txt)
 └── nfqws2/            # конфигурация nfqws2
 ```

@@ -131,13 +131,37 @@ sh -c "$(curl -fsSL https://github.com/mishgun64/keenetic-entware-tools/raw/refs
 
 Побочных `.json` и `server.base.conf` нет: параметры профиля (endpoint, DNS, AllowedIPs клиентов) хранятся комментариями `# wg-manager: …` в `server.conf`, а клиент считается включённым, пока его блок `[Peer]` есть в `server.conf`.
 
-Запуск одной строкой (без клонирования репозитория, из нужного каталога):
+### Интерактивное меню
+
+Без аргументов скрипт показывает диалог: что сделать дальше. Это основной режим при ручной работе.
+
+```powershell
+& ([scriptblock]::Create((irm https://github.com/mishgun64/keenetic-entware-tools/raw/refs/heads/main/wg-manager.ps1)))
+```
+
+```
+What do you want to do?
+  1) create server
+  2) add client
+  3) list clients
+  4) show client config
+  5) export client path
+  6) show client QR
+  7) enable client
+  8) disable client
+  9) remove client
+  0) exit
+```
+
+Меню работает циклично: после действия возвращается к списку (перед этим ждёт Enter), `0`/`q` — выход. Сервер и клиент можно выбрать номером или именем, `b` — назад. Для «создать сервер» значения по умолчанию (порт, адрес, DNS, AllowedIPs) предлагаются в квадратных скобках — Enter принимает их. Ошибки выводятся в меню и не прерывают работу.
+
+### Запуск одной командой с параметрами
+
+То же самое без меню, если нужно сразу выполнить конкретную операцию (например из другого скрипта):
 
 ```powershell
 & ([scriptblock]::Create((irm https://github.com/mishgun64/keenetic-entware-tools/raw/refs/heads/main/wg-manager.ps1))) server init home -Endpoint vpn.example.com:51820
 ```
-
-С параметрами конкретной операции:
 
 ```powershell
 & ([scriptblock]::Create((irm https://github.com/mishgun64/keenetic-entware-tools/raw/refs/heads/main/wg-manager.ps1))) client add home ivan

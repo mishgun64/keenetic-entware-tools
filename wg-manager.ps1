@@ -21,8 +21,8 @@
 [CmdletBinding()]
 param(
     [Parameter(Position=0)]
-    [ValidateSet('server','client','help')]
-    [string]$Action = 'help',
+    [ValidateSet('server','client','help','menu')]
+    [string]$Action = 'menu',
 
     [Parameter(Position=1)]
     [string]$Operation,
@@ -71,6 +71,8 @@ Client:
 Optional:
   -Root "D:\WireGuard"   Storage directory (default: current directory)
   -WgPath "C:\Program Files\WireGuard\wg.exe"
+
+Run without arguments for an interactive menu.
 
 Layout (relative to the current directory):
   home/server.conf
@@ -491,8 +493,209 @@ function Set-ClientEnabled {
     }
 }
 
+# --- interactive menu ------------------------------------------------------
+
+function Read-Choice {
+    param([string]$Prompt)
+    return (Read-Host $Prompt).Trim()
+}
+
+function Read-ChoiceDefault {
+    param([string]$Prompt, [string]$Default)
+    $value = Read-Choice "$Prompt [$Default]"
+    if ([string]::IsNullOrWhiteSpace($value)) { return $Default }
+    return $value
+}
+
+function Get-ServerNames {
+    if (-not (Test-Path -LiteralPath $Root)) { return @() }
+    return @(Get-ChildItem -LiteralPath $Root -Directory -ErrorAction SilentlyContinue |
+        Where-Object { Test-Path -LiteralPath (Join-Path $_.FullName 'server.conf') } |
+        Sort-Object Name | ForEach-Object { $_.Name })
+}
+
+function Select-InteractiveServer {
+    $names = @(Get-ServerNames)
+    Write-Host ''
+    Write-Host 'Servers:'
+    if ($names.Count -eq 0) {
+        Write-Host '  (no servers yet, create one first)'
+        return $null
+    }
+    for ($i = 0; $i -lt $names.Count; $i++) {
+        Write-Host ("  {0}) {1}" -f ($i + 1), $names[$i])
+    }
+    Write-Host '  b) back'
+    while ($true) {
+        $answer = Read-Choice 'Number or name'
+        if ($answer -match '^(b|back|q|quit)$') { return $null }
+        if ($answer -match '^\d+$') {
+            $idx = [int]$answer - 1
+            if ($idx -ge 0 -and $idx -lt $names.Count) { return $names[$idx] }
+        }
+        if ($names -contains $answer) { return $answer }
+        Write-Host 'Invalid choice.'
+    }
+}
+
+function Select-InteractiveClient {
+    param([string]$ServerName)
+    $names = @(Get-ClientNames $ServerName)
+    Write-Host ''
+    Write-Host "Clients of '$ServerName':"
+    if ($names.Count -eq 0) {
+        Write-Host '  (none yet)'
+        return $null
+    }
+    for ($i = 0; $i -lt $names.Count; $i++) {
+        Write-Host ("  {0}) {1}" -f ($i + 1), $names[$i])
+    }
+    Write-Host '  b) back'
+    while ($true) {
+        $answer = Read-Choice 'Number or name'
+        if ($answer -match '^(b|back|q|quit)$') { return $null }
+        if ($answer -match '^\d+$') {
+            $idx = [int]$answer - 1
+            if ($idx -ge 0 -and $idx -lt $names.Count) { return $names[$idx] }
+        }
+        if ($names -contains $answer) { return $answer }
+        Write-Host 'Invalid choice.'
+    }
+}
+
+function Invoke-MenuInitServer {
+    $serverName = Read-Choice 'Server name'
+    if ([string]::IsNullOrWhiteSpace($serverName)) { return }
+    $endpointValue = Read-Choice 'Endpoint (host:port), e.g. vpn.example.com:51820'
+    if ([string]::IsNullOrWhiteSpace($endpointValue)) { Write-Host 'Endpoint is required.'; return }
+
+    $portValue = Read-ChoiceDefault 'Listen port' "$ListenPort"
+    if ($portValue -notmatch '^\d+$') { Write-Host 'Invalid port.'; return }
+
+    $Endpoint = $endpointValue
+    $Address = Read-ChoiceDefault 'Server address (CIDR)' $Address
+    $ListenPort = [int]$portValue
+    $DNS = Read-ChoiceDefault 'DNS for clients' $DNS
+    $ClientAllowedIPs = Read-ChoiceDefault 'Client AllowedIPs' $ClientAllowedIPs
+
+    Initialize-Server $serverName
+}
+
+function Invoke-MenuAddClient {
+    $serverName = Select-InteractiveServer
+    if (-not $serverName) { return }
+    $clientName = Read-Choice 'New client name'
+    if ([string]::IsNullOrWhiteSpace($clientName)) { return }
+    Add-Client $serverName $clientName
+}
+
+function Invoke-MenuListItem([string]$ServerName) {
+    $conf = Read-Server $ServerName
+    $names = @(Get-ClientNames $ServerName)
+    if ($names.Count -eq 0) { Write-Host 'No clients.'; return }
+    $names | ForEach-Object {
+        $path = Get-ClientConfPath $ServerName $_
+        [pscustomobject]@{
+            Name    = $_
+            Address = (Read-ClientAddress $path)
+            Status  = $(if (Find-Peer $conf $_) { 'Enabled' } else { 'Disabled' })
+        }
+    } | Format-Table -AutoSize
+}
+
+function Invoke-MenuClientAction {
+    param([ValidateSet('show','export','qr','enable','disable','remove')][string]$Kind)
+
+    $serverName = Select-InteractiveServer
+    if (-not $serverName) { return }
+    $clientName = Select-InteractiveClient $serverName
+    if (-not $clientName) { return }
+
+    $conf = Read-Server $serverName
+    $path = Get-ClientConfPath $serverName $clientName
+    if (-not (Test-Path -LiteralPath $path)) { throw "Client '$clientName' not found on server '$serverName'." }
+
+    switch ($Kind) {
+        'show' {
+            Get-Content -LiteralPath $path -Raw | Write-Output
+            Write-Host "`nStatus: $(if (Find-Peer $conf $clientName) { 'Enabled' } else { 'Disabled' })"
+        }
+        'export' { Write-Host (Resolve-Path -LiteralPath $path).Path }
+        'qr' {
+            $qr = Get-Command 'qrencode.exe' -ErrorAction SilentlyContinue
+            if (-not $qr) { $qr = Get-Command 'qrencode' -ErrorAction SilentlyContinue }
+            if (-not $qr) { throw 'qrencode not found. Install qrencode and add it to PATH.' }
+            & $qr.Source '-t' 'ansiutf8' '-r' $path
+            if ($LASTEXITCODE -ne 0) { throw 'qrencode failed.' }
+        }
+        'enable'  { Set-ClientEnabled $serverName $clientName $true }
+        'disable' { Set-ClientEnabled $serverName $clientName $false }
+        'remove'  {
+            $confirm = Read-Host "Permanently remove client '$clientName' from '$serverName'? Type YES"
+            if ($confirm -cne 'YES') { Write-Host 'Cancelled.'; return }
+            Remove-Item -LiteralPath $path -Force
+            if (Find-Peer $conf $clientName) {
+                $conf.Peers = @($conf.Peers | Where-Object { $_.Name -ne $clientName })
+                Write-ServerConf $conf
+            }
+            Write-Host "[+] Client '$clientName' removed." -ForegroundColor Green
+        }
+    }
+}
+
+function Invoke-InteractiveMenu {
+    Write-Host ''
+    Write-Host 'WireGuard Manager' -ForegroundColor Cyan
+    Write-Host "Directory: $Root"
+
+    while ($true) {
+        Write-Host ''
+        Write-Host 'What do you want to do?'
+        Write-Host '  1) create server'
+        Write-Host '  2) add client'
+        Write-Host '  3) list clients'
+        Write-Host '  4) show client config'
+        Write-Host '  5) export client path'
+        Write-Host '  6) show client QR'
+        Write-Host '  7) enable client'
+        Write-Host '  8) disable client'
+        Write-Host '  9) remove client'
+        Write-Host '  0) exit'
+
+        $choice = Read-Choice 'Choice'
+        if ($choice -match '^(0|q|quit|exit)$') {
+            Write-Host 'Bye.'
+            return
+        }
+
+        try {
+            switch ($choice) {
+                '1' { Invoke-MenuInitServer }
+                '2' { Invoke-MenuAddClient }
+                '3' {
+                    $serverName = Select-InteractiveServer
+                    if ($serverName) { Invoke-MenuListItem $serverName }
+                }
+                '4' { Invoke-MenuClientAction 'show' }
+                '5' { Invoke-MenuClientAction 'export' }
+                '6' { Invoke-MenuClientAction 'qr' }
+                '7' { Invoke-MenuClientAction 'enable' }
+                '8' { Invoke-MenuClientAction 'disable' }
+                '9' { Invoke-MenuClientAction 'remove' }
+                default { Write-Host 'Unknown choice.' -ForegroundColor Yellow }
+            }
+        }
+        catch {
+            Write-Host ("Error: " + $_.Exception.Message) -ForegroundColor Red
+        }
+
+        $null = Read-Host 'Press Enter to continue'
+    }
+}
+
 # --- dispatch --------------------------------------------------------------
 
+if ($Action -eq 'menu') { Invoke-InteractiveMenu; exit 0 }
 if ($Action -eq 'help' -or $Operation -eq 'help') { Show-Help; exit 0 }
 
 switch ("$Action $Operation") {

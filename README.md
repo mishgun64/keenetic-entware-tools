@@ -116,20 +116,23 @@ sh -c "$(curl -fsSL https://github.com/mishgun64/keenetic-entware-tools/raw/refs
 
 ## 4. Конфиги WireGuard
 
-`wg-manager.ps1` создаёт и ведёт конфигурации WireGuard **локально**: серверный `server.conf` с пирами клиентов и по файлу `clients/<имя>.conf` на каждого клиента. На роутер и на VPN-сервер он ничего не применяет — готовый `server.conf` выкладывается отдельно.
+`wg-manager.ps1` создаёт и ведёт конфигурации WireGuard **локально**: серверный `server.conf` с пирами клиентов и по файлу `<имя>.conf` (плюс `<имя>.png` с QR-кодом) на каждого клиента. На роутер и на VPN-сервер он ничего не применяет — готовый `server.conf` выкладывается отдельно.
 
 Нужен `wg.exe` (WireGuard for Windows) в `PATH` — либо путь в `-WgPath`. Файлы пишутся **в текущий каталог**, в подпапку с именем сервера:
 
 ```
 <текущий каталог>/
-└── home/                    # имя сервера (аргумент <server>)
+└── wg-home/                 # имя сервера (аргумент <server>)
     ├── server.conf          # серверный конфиг, [Peer] на каждого клиента
-    └── clients/
-        ├── ivan.conf
-        └── oleg.conf
+    ├── ivan.conf            # клиентский конфиг
+    ├── ivan.png             # QR-код клиента (PNG)
+    ├── oleg.conf
+    └── oleg.png
 ```
 
-Побочных `.json` и `server.base.conf` нет: параметры профиля (endpoint, DNS, AllowedIPs клиентов) хранятся комментариями `# wg-manager: …` в `server.conf`, а клиент считается включённым, пока его блок `[Peer]` есть в `server.conf`.
+Клиентские файлы лежат **в той же папке**, что и `server.conf`.
+
+Побочных `.json` и `server.base.conf` нет: параметры профиля (endpoint, DNS, AllowedIPs клиентов) хранятся комментариями `# wg-manager: …` в `server.conf`, а список клиентов — это `.conf`-файлы в папке сервера.
 
 ### Интерактивное меню
 
@@ -146,14 +149,21 @@ What do you want to do?
   3) list clients
   4) show client config
   5) export client path
-  6) show client QR
-  7) enable client
-  8) disable client
-  9) remove client
+  6) remove client
   0) exit
 ```
 
-Меню работает циклично: после действия возвращается к списку (перед этим ждёт Enter), `0`/`q` — выход. Сервер и клиент можно выбрать номером или именем, `b` — назад. Для «создать сервер» значения по умолчанию (порт, адрес, DNS, AllowedIPs) предлагаются в квадратных скобках — Enter принимает их. Ошибки выводятся в меню и не прерывают работу.
+Меню работает циклично: после действия возвращается к списку (перед этим ждёт Enter), `0`/`q` — выход. Сервер и клиент можно выбрать номером или именем, `b` — назад. Ошибки выводятся в меню и не прерывают работу.
+
+Значения по умолчанию при создании сервера (Enter принимает их):
+
+| Вопрос | По умолчанию |
+|---|---|
+| Server name | `wg-home` |
+| Listen port | `51820` |
+| Server address | `10.10.0.1/24` |
+| DNS for clients | адрес сервера (`10.10.0.1`) |
+| Client AllowedIPs | `0.0.0.0/0` |
 
 ### Запуск одной командой с параметрами
 
@@ -172,15 +182,15 @@ What do you want to do?
 | Команда | Что делает |
 |---|---|
 | `server init <server> -Endpoint host:port` | Создаёт `./<server>/server.conf` (ключи генерирует `wg genkey`/`pubkey`) |
-| `client add <server> <client>` | Новый клиент: ключи, PSK, свободный IP из подсети сервера, `clients/<client>.conf`, пир в `server.conf` |
+| `client add <server> <client>` | Новый клиент: ключи, PSK, свободный IP из подсети сервера, `<client>.conf` и `<client>.png` в папке сервера, пир в `server.conf` |
 | `client list <server>` | Таблица клиентов: имя, адрес, Enabled/Disabled |
-| `client show <server> <client>` | Показывает клиентский конфиг и его статус |
+| `client show <server> <client>` | Показывает клиентский конфиг |
 | `client export <server> <client>` | Печатает полный путь к файлу клиента |
-| `client qr <server> <client>` | Рисует QR-код конфига (нужен `qrencode`) |
-| `client disable` / `client enable` | Убирает/возвращает блок `[Peer]` клиента в `server.conf` |
-| `client remove <server> <client>` | Удаляет клиента (с подтверждением `YES`) |
+| `client remove <server> <client>` | Удаляет клиента и его `.png` (с подтверждением `YES`) |
 
-Параметры `server init`: `-Address 10.10.0.1/24`, `-ListenPort 51820`, `-DNS 1.1.1.1`, `-ClientAllowedIPs "0.0.0.0/0, ::/0"`. Адрес клиента выдаётся автоматически из подсети сервера (поддерживаются IPv4-префиксы `/16`–`/30`). Каталог хранения можно переопределить через `-Root`, путь к `wg.exe` — через `-WgPath`.
+QR-код клиента создаётся автоматически при `client add` файлом `<client>.png` рядом с конфигом. В терминал он не выводится — встроенный генератор не требует `qrencode` или других внешних программ.
+
+Параметры `server init`: `-Address 10.10.0.1/24`, `-ListenPort 51820`, `-DNS 10.10.0.1`, `-ClientAllowedIPs "0.0.0.0/0"`. `-DNS` по умолчанию берётся из адреса сервера. Адрес клиента выдаётся автоматически из подсети сервера (поддерживаются IPv4-префиксы `/16`–`/30`). Каталог хранения можно переопределить через `-Root`, путь к `wg.exe` — через `-WgPath`.
 
 Перед каждой перезаписью `server.conf` рядом сохраняется резервная копия `server.conf.<дата>-<время>.bak`.
 

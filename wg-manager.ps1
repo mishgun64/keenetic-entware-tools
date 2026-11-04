@@ -9,13 +9,14 @@
 
   Everything is written to the directory the script is started from:
 
-      ./<server>/server.conf          server config (with a peer block per client)
-      ./<server>/clients/<name>.conf  client config
+      ./<server>/server.conf   server config (with a peer block per client)
+      ./<server>/<name>.conf   client config
+      ./<server>/<name>.png    client QR code
 
   No .json or server.base.conf side files are used: the server profile
   settings (endpoint, DNS, client AllowedIPs) are stored as "# wg-manager:"
-  comment lines inside server.conf, and a client is considered enabled while
-  its [Peer] block is present in server.conf.
+  comment lines inside server.conf. Client files live next to server.conf,
+  together with a .png QR code generated for each client.
 #>
 
 [CmdletBinding()]
@@ -36,8 +37,8 @@ param(
     [string]$Endpoint,
     [string]$Address = '10.10.0.1/24',
     [int]$ListenPort = 51820,
-    [string]$DNS = '1.1.1.1',
-    [string]$ClientAllowedIPs = '0.0.0.0/0, ::/0',
+    [string]$DNS = '',
+    [string]$ClientAllowedIPs = '0.0.0.0/0',
     [string]$Root,
     [string]$WgPath
 )
@@ -54,19 +55,20 @@ function Show-Help {
 WireGuard Manager (local configuration files)
 
 Server:
-  .\wg-manager.ps1 server init home -Endpoint vpn.example.com:51820
-      [-Address 10.10.0.1/24] [-ListenPort 51820] [-DNS 1.1.1.1]
-      [-ClientAllowedIPs "0.0.0.0/0, ::/0"]
+  .\wg-manager.ps1 server init wg-home -Endpoint vpn.example.com:51820
+      [-Address 10.10.0.1/24] [-ListenPort 51820] [-DNS 10.10.0.1]
+      [-ClientAllowedIPs "0.0.0.0/0"]
+
+  -DNS defaults to the server address, clients get a .png QR next to their config.
 
 Client:
   .\wg-manager.ps1 client add home ivan
   .\wg-manager.ps1 client list home
   .\wg-manager.ps1 client show home ivan
   .\wg-manager.ps1 client export home ivan
-  .\wg-manager.ps1 client qr home ivan
-  .\wg-manager.ps1 client disable home ivan
-  .\wg-manager.ps1 client enable home ivan
   .\wg-manager.ps1 client remove home ivan
+
+A .png QR code is written next to every client config.
 
 Optional:
   -Root "D:\WireGuard"   Storage directory (default: current directory)
@@ -74,12 +76,14 @@ Optional:
 
 Run without arguments for an interactive menu.
 
-Layout (relative to the current directory):
-  home/server.conf
-  home/clients/ivan.conf
+Layout (relative to the current directory, one folder per server):
+  wg-home/server.conf
+  wg-home/ivan.conf
+  wg-home/ivan.png
 
 Notes:
-  - server init creates ./home/server.conf.
+  - server init creates ./wg-home/server.conf.
+  - Client files live in the same folder as server.conf.
   - Client operations update only the local server.conf and client .conf.
   - Upload/apply server.conf on the actual VPN server separately.
 '@ | Write-Host
@@ -137,8 +141,9 @@ function Get-ServerConfPath {
 }
 
 function Get-ClientsDir {
+    # client files live next to server.conf
     param([string]$ServerName)
-    return (Join-Path (Get-ServerDir $ServerName) 'clients')
+    return (Get-ServerDir $ServerName)
 }
 
 function Get-ClientConfPath {
@@ -261,53 +266,12 @@ function Read-Server {
     return $conf
 }
 
-function Read-ClientKey {
-    param([string]$ClientConfPath)
-    $key = ''
-    $section = ''
-    foreach ($raw in @(Get-Content -LiteralPath $ClientConfPath)) {
-        $line = $raw.Trim()
-        if ($line -match '^\[(.+?)\]$') { $section = $Matches[1].ToLowerInvariant(); continue }
-        if ($section -eq 'interface' -and $line -match '^PrivateKey\s*=\s*(.+)$') {
-            $key = $Matches[1].Trim()
-            break
-        }
-    }
-    if (-not $key) { throw "No PrivateKey in $ClientConfPath" }
-    return $key
-}
-
-function Read-ClientAddress {
-    param([string]$ClientConfPath)
-    $section = ''
-    foreach ($raw in @(Get-Content -LiteralPath $ClientConfPath)) {
-        $line = $raw.Trim()
-        if ($line -match '^\[(.+?)\]$') { $section = $Matches[1].ToLowerInvariant(); continue }
-        if ($section -eq 'interface' -and $line -match '^Address\s*=\s*(.+)$') {
-            return ($Matches[1].Trim() -split ',')[0].Trim()
-        }
-    }
-    throw "No Address in $ClientConfPath"
-}
-
-function Read-ClientPresharedKey {
-    param([string]$ClientConfPath)
-    $section = ''
-    foreach ($raw in @(Get-Content -LiteralPath $ClientConfPath)) {
-        $line = $raw.Trim()
-        if ($line -match '^\[(.+?)\]$') { $section = $Matches[1].ToLowerInvariant(); continue }
-        if ($section -eq 'peer' -and $line -match '^PresharedKey\s*=\s*(.+)$') {
-            return $Matches[1].Trim()
-        }
-    }
-    return ''
-}
-
 function Get-ClientNames {
     param([string]$ServerName)
     $dir = Get-ClientsDir $ServerName
     if (-not (Test-Path -LiteralPath $dir)) { return @() }
     return @(Get-ChildItem -LiteralPath $dir -Filter '*.conf' -File -ErrorAction SilentlyContinue |
+        Where-Object { $_.Name -ne 'server.conf' } |
         Sort-Object Name | ForEach-Object { [IO.Path]::GetFileNameWithoutExtension($_.Name) })
 }
 
@@ -458,38 +422,426 @@ function Add-Client {
     })
     Write-ServerConf $conf
 
+    $qrPath = Join-Path (Get-ServerDir $ServerName) "$ClientName.png"
+    Write-ClientQrCode -Text ($clientConfig -join "`r`n") -Path $qrPath
+
     Write-Host "[+] Client created: $ClientName" -ForegroundColor Green
     Write-Host "[+] Address: $ip"
-    Write-Host "[+] Config: $(Join-Path $ServerName "clients\$ClientName.conf")"
+    Write-Host "[+] Config: $(Join-Path $ServerName "$ClientName.conf")"
+    Write-Host "[+] QR code: $(Join-Path $ServerName "$ClientName.png")"
 }
 
-function Set-ClientEnabled {
-    param([string]$ServerName, [string]$ClientName, [bool]$Enabled)
-
-    $conf = Read-Server $ServerName
-    $clientPath = Get-ClientConfPath $ServerName $ClientName
-    if (-not (Test-Path -LiteralPath $clientPath)) { throw "Client '$ClientName' not found on server '$ServerName'." }
-
-    $peer = Find-Peer $conf $ClientName
-
-    if ($Enabled) {
-        if ($peer) { Write-Host "Client '$ClientName' is already enabled."; return }
-        $privateKey = Read-ClientKey $clientPath
-        $publicKey = Invoke-WgText -WgArgs @('pubkey') -InputText $privateKey
-        $conf.Peers = @($conf.Peers) + @([pscustomobject]@{
-            Name = $ClientName
-            PublicKey = $publicKey
-            PresharedKey = (Read-ClientPresharedKey $clientPath)
-            AllowedIPs = (Read-ClientAddress $clientPath)
-        })
-        Write-ServerConf $conf
-        Write-Host "[+] Client '$ClientName' enabled." -ForegroundColor Green
+# QR codes are produced as PNG files only, never printed to the terminal.
+function Write-ClientQrCode {
+    param([string]$Text, [string]$Path)
+    try {
+        Write-QrPng -Text $Text -Path $Path -BoxSize 8
     }
-    else {
-        if (-not $peer) { Write-Host "Client '$ClientName' is already disabled."; return }
-        $conf.Peers = @($conf.Peers | Where-Object { $_.Name -ne $ClientName })
-        Write-ServerConf $conf
-        Write-Host "[+] Client '$ClientName' disabled." -ForegroundColor Green
+    catch {
+        Write-Warning ("QR code not generated: " + $_.Exception.Message)
+    }
+}
+
+# --- minimal QR encoder: byte mode, ECC level M, versions 1..15 ---
+# Self-contained: no external tools. Uses flat script-scoped arrays because
+# PowerShell unwraps multi-dimensional arrays when passed as parameters.
+
+# data codewords, EC codewords per block, block layout (count, data codewords)
+$script:QrSpec = @{
+    1  = @{ Data = 16;  Ec = 10; Blocks = @(@{ Count = 1; Words = 16 }) }
+    2  = @{ Data = 28;  Ec = 16; Blocks = @(@{ Count = 1; Words = 28 }) }
+    3  = @{ Data = 44;  Ec = 26; Blocks = @(@{ Count = 1; Words = 44 }) }
+    4  = @{ Data = 64;  Ec = 18; Blocks = @(@{ Count = 2; Words = 32 }) }
+    5  = @{ Data = 86;  Ec = 24; Blocks = @(@{ Count = 2; Words = 43 }) }
+    6  = @{ Data = 108; Ec = 16; Blocks = @(@{ Count = 4; Words = 27 }) }
+    7  = @{ Data = 124; Ec = 18; Blocks = @(@{ Count = 4; Words = 31 }) }
+    8  = @{ Data = 154; Ec = 22; Blocks = @(@{ Count = 2; Words = 38 }, @{ Count = 2; Words = 39 }) }
+    9  = @{ Data = 182; Ec = 22; Blocks = @(@{ Count = 3; Words = 36 }, @{ Count = 2; Words = 37 }) }
+    10 = @{ Data = 216; Ec = 26; Blocks = @(@{ Count = 4; Words = 43 }, @{ Count = 1; Words = 44 }) }
+    11 = @{ Data = 254; Ec = 30; Blocks = @(@{ Count = 1; Words = 50 }, @{ Count = 4; Words = 51 }) }
+    12 = @{ Data = 290; Ec = 22; Blocks = @(@{ Count = 6; Words = 36 }, @{ Count = 2; Words = 37 }) }
+    13 = @{ Data = 334; Ec = 22; Blocks = @(@{ Count = 8; Words = 37 }, @{ Count = 1; Words = 38 }) }
+    14 = @{ Data = 365; Ec = 24; Blocks = @(@{ Count = 4; Words = 40 }, @{ Count = 5; Words = 41 }) }
+    15 = @{ Data = 415; Ec = 24; Blocks = @(@{ Count = 5; Words = 41 }, @{ Count = 5; Words = 42 }) }
+}
+
+$script:QrAlign = @{
+    1  = @();             2  = @(6, 18);          3  = @(6, 22)
+    4  = @(6, 26);        5  = @(6, 30);          6  = @(6, 34)
+    7  = @(6, 22, 38);    8  = @(6, 24, 42);      9  = @(6, 26, 46)
+    10 = @(6, 28, 50);    11 = @(6, 30, 54);      12 = @(6, 32, 58)
+    13 = @(6, 34, 62);    14 = @(6, 26, 46, 66);  15 = @(6, 26, 48, 70)
+}
+
+# GF(256), primitive polynomial 0x11D
+$script:GfExp = New-Object int[] 512
+$script:GfLog = New-Object int[] 256
+$gfValue = 1
+for ($i = 0; $i -lt 255; $i++) {
+    $script:GfExp[$i] = $gfValue
+    $script:GfLog[$gfValue] = $i
+    $gfValue = $gfValue * 2
+    if ($gfValue -ge 256) { $gfValue = $gfValue -bxor 0x11D }
+}
+for ($i = 255; $i -lt 512; $i++) { $script:GfExp[$i] = $script:GfExp[$i - 255] }
+
+function Get-GfMul([int]$a, [int]$b) {
+    if ($a -eq 0 -or $b -eq 0) { return 0 }
+    return $script:GfExp[$script:GfLog[$a] + $script:GfLog[$b]]
+}
+
+function Get-RsDivisor([int]$degree) {
+    $result = New-Object 'int[]' -ArgumentList $degree
+    $result[$degree - 1] = 1
+    $root = 1
+    for ($i = 0; $i -lt $degree; $i++) {
+        for ($j = 0; $j -lt $degree; $j++) {
+            $result[$j] = Get-GfMul $result[$j] $root
+            if (($j + 1) -lt $degree) { $result[$j] = $result[$j] -bxor $result[$j + 1] }
+        }
+        $root = Get-GfMul $root 0x02
+    }
+    return $result
+}
+
+function Get-RsRemainder([int[]]$data, [int]$degree) {
+    $divisor = Get-RsDivisor $degree
+    $result = New-Object 'int[]' -ArgumentList $degree
+    foreach ($byte in $data) {
+        $factor = $byte -bxor $result[0]
+        for ($i = 0; $i -lt ($degree - 1); $i++) { $result[$i] = $result[$i + 1] }
+        $result[$degree - 1] = 0
+        for ($i = 0; $i -lt $degree; $i++) {
+            $result[$i] = $result[$i] -bxor (Get-GfMul $divisor[$i] $factor)
+        }
+    }
+    return $result
+}
+
+function Get-QrPenalty($modules, $reserved, [int]$size) {
+    $score = 0
+    # rule 1: runs of five or more same-coloured modules
+    for ($i = 0; $i -lt $size; $i++) {
+        $runRow = 1; $runCol = 1
+        for ($j = 1; $j -lt $size; $j++) {
+            if ($modules[$i * $size + $j] -eq $modules[$i * $size + $j - 1]) { $runRow++ }
+            else { if ($runRow -ge 5) { $score += $runRow - 2 }; $runRow = 1 }
+            if ($modules[$j * $size + $i] -eq $modules[($j - 1) * $size + $i]) { $runCol++ }
+            else { if ($runCol -ge 5) { $score += $runCol - 2 }; $runCol = 1 }
+        }
+        if ($runRow -ge 5) { $score += $runRow - 2 }
+        if ($runCol -ge 5) { $score += $runCol - 2 }
+    }
+    # rule 2: 2x2 blocks of one colour
+    for ($i = 0; $i -lt ($size - 1); $i++) {
+        for ($j = 0; $j -lt ($size - 1); $j++) {
+            $c = $modules[$i * $size + $j]
+            if ($c -eq $modules[$i * $size + $j + 1] -and
+                $c -eq $modules[($i + 1) * $size + $j] -and
+                $c -eq $modules[($i + 1) * $size + $j + 1]) { $score += 3 }
+        }
+    }
+    # rule 3: finder-like 1:1:3:1:1 patterns
+    $patA = @($true, $false, $true, $true, $true, $false, $true, $false, $false, $false, $false)
+    $patB = @($false, $false, $false, $false, $true, $false, $true, $true, $true, $false, $true)
+    for ($i = 0; $i -lt $size; $i++) {
+        for ($j = 0; $j -le ($size - 11); $j++) {
+            $okA = $true; $okB = $true; $okC = $true; $okD = $true
+            for ($k = 0; $k -lt 11; $k++) {
+                if ($modules[$i * $size + $j + $k] -ne $patA[$k]) { $okA = $false }
+                if ($modules[$i * $size + $j + $k] -ne $patB[$k]) { $okB = $false }
+                if ($modules[($j + $k) * $size + $i] -ne $patA[$k]) { $okC = $false }
+                if ($modules[($j + $k) * $size + $i] -ne $patB[$k]) { $okD = $false }
+            }
+            if ($okA) { $score += 40 }
+            if ($okB) { $score += 40 }
+            if ($okC) { $score += 40 }
+            if ($okD) { $score += 40 }
+        }
+    }
+    # rule 4: balance of dark modules
+    $dark = 0
+    for ($i = 0; $i -lt ($size * $size); $i++) { if ($modules[$i]) { $dark++ } }
+    $percent = ($dark * 100) / ($size * $size)
+    $score += [int]([math]::Floor([math]::Abs($percent - 50) / 5)) * 10
+    return $score
+}
+
+function Get-QrFormatBits([int]$mask) {
+    $data = $mask -band 0x07            # ECC level M is 00
+    $rem = $data
+    for ($i = 0; $i -lt 10; $i++) {
+        $rem = $rem -shl 1
+        if (($rem -band 0x400) -ne 0) { $rem = $rem -bxor 0x537 }
+    }
+    return ((($data -shl 10) -bor $rem) -bxor 0x5412)
+}
+
+function Get-QrVersionBits([int]$version) {
+    $rem = $version
+    for ($i = 0; $i -lt 12; $i++) {
+        $rem = $rem -shl 1
+        if (($rem -band 0x1000) -ne 0) { $rem = $rem -bxor 0x1F25 }
+    }
+    return (($version -shl 12) -bor $rem)
+}
+
+function Get-QrMaskBit([int]$mask, [int]$row, [int]$col) {
+    switch ($mask) {
+        0 { return ((($row + $col) % 2) -eq 0) }
+        1 { return (($row % 2) -eq 0) }
+        2 { return (($col % 3) -eq 0) }
+        3 { return ((($row + $col) % 3) -eq 0) }
+        4 { return ((([math]::Floor($row / 2) + [math]::Floor($col / 3)) % 2) -eq 0) }
+        5 { return (((($row * $col) % 2) + (($row * $col) % 3)) -eq 0) }
+        6 { return ((((($row * $col) % 2) + (($row * $col) % 3)) % 2) -eq 0) }
+        7 { return ((((($row + $col) % 2) + (($row * $col) % 3)) % 2) -eq 0) }
+    }
+    return $false
+}
+
+function New-QrMatrix([string]$Text) {
+    $bytes = [System.Text.Encoding]::UTF8.GetBytes($Text)
+
+    $version = 0
+    foreach ($candidate in 1..15) {
+        $candidateSpec = $script:QrSpec[$candidate]
+        $candidateBits = 8
+        if ($candidate -ge 10) { $candidateBits = 16 }
+        $capacityBytes = [math]::Floor(($candidateSpec.Data * 8 - 4 - $candidateBits) / 8)
+        if ($bytes.Length -le $capacityBytes) { $version = $candidate; break }
+    }
+    if ($version -eq 0) { throw "QR payload too long: $($bytes.Length) bytes" }
+
+    $spec = $script:QrSpec[$version]
+    $countBits = 8
+    if ($version -ge 10) { $countBits = 16 }
+
+    # mode indicator (byte mode), character count, payload
+    $bits = New-Object System.Collections.Generic.List[bool]
+    for ($i = 3; $i -ge 0; $i--) { $bits.Add(((4 -shr $i) -band 1) -eq 1) }
+    for ($i = ($countBits - 1); $i -ge 0; $i--) { $bits.Add((($bytes.Length -shr $i) -band 1) -eq 1) }
+    foreach ($byte in $bytes) {
+        for ($i = 7; $i -ge 0; $i--) { $bits.Add((($byte -shr $i) -band 1) -eq 1) }
+    }
+
+    $capacityBits = $spec.Data * 8
+    $terminator = [math]::Min(4, $capacityBits - $bits.Count)
+    for ($i = 0; $i -lt $terminator; $i++) { $bits.Add($false) }
+    while (($bits.Count % 8) -ne 0) { $bits.Add($false) }
+
+    $dataCodewords = New-Object System.Collections.Generic.List[int]
+    for ($i = 0; $i -lt $bits.Count; $i += 8) {
+        $value = 0
+        for ($k = 0; $k -lt 8; $k++) { if ($bits[$i + $k]) { $value = $value -bor (1 -shl (7 - $k)) } }
+        $dataCodewords.Add($value)
+    }
+    $padBytes = @(0xEC, 0x11)
+    $padIndex = 0
+    while ($dataCodewords.Count -lt $spec.Data) {
+        $dataCodewords.Add($padBytes[$padIndex % 2])
+        $padIndex++
+    }
+
+    # split into blocks, compute the error correction codewords
+    $blocks = New-Object System.Collections.Generic.List[object]
+    $offset = 0
+    foreach ($group in $spec.Blocks) {
+        $blockCount = $group.Count
+        $blockWords = $group.Words
+        for ($b = 0; $b -lt $blockCount; $b++) {
+            $chunk = New-Object 'int[]' -ArgumentList $blockWords
+            for ($k = 0; $k -lt $blockWords; $k++) { $chunk[$k] = $dataCodewords[$offset + $k] }
+            $offset += $blockWords
+            $blocks.Add([pscustomobject]@{ Data = $chunk; Ec = (Get-RsRemainder $chunk $spec.Ec) })
+        }
+    }
+
+    # interleave data and EC codewords
+    $final = New-Object System.Collections.Generic.List[int]
+    $maxData = 0
+    foreach ($block in $blocks) { if ($block.Data.Length -gt $maxData) { $maxData = $block.Data.Length } }
+    for ($i = 0; $i -lt $maxData; $i++) {
+        foreach ($block in $blocks) { if ($i -lt $block.Data.Length) { $final.Add($block.Data[$i]) } }
+    }
+    for ($i = 0; $i -lt $spec.Ec; $i++) {
+        foreach ($block in $blocks) { $final.Add($block.Ec[$i]) }
+    }
+
+    $size = 17 + 4 * $version
+    $modules = New-Object 'bool[]' -ArgumentList ($size * $size)
+    $reserved = New-Object 'bool[]' -ArgumentList ($size * $size)
+    $isFunction = New-Object 'bool[]' -ArgumentList ($size * $size)
+
+    # finder patterns with separators
+    foreach ($corner in @(@(0, 0), @(0, ($size - 7)), @(($size - 7), 0))) {
+        for ($r = -1; $r -le 7; $r++) {
+            for ($c = -1; $c -le 7; $c++) {
+                $rr = $corner[0] + $r
+                $cc = $corner[1] + $c
+                if ($rr -lt 0 -or $cc -lt 0 -or $rr -ge $size -or $cc -ge $size) { continue }
+                $dark = (($r -ge 0 -and $r -le 6 -and ($c -eq 0 -or $c -eq 6)) -or
+                         ($c -ge 0 -and $c -le 6 -and ($r -eq 0 -or $r -eq 6)) -or
+                         ($r -ge 2 -and $r -le 4 -and $c -ge 2 -and $c -le 4))
+                $modules[$rr * $size + $cc] = $dark
+                $isFunction[$rr * $size + $cc] = $true
+            }
+        }
+    }
+
+    # timing patterns
+    for ($i = 8; $i -lt ($size - 8); $i++) {
+        $dark = (($i % 2) -eq 0)
+        $modules[6 * $size + $i] = $dark
+        $isFunction[6 * $size + $i] = $true
+        $modules[$i * $size + 6] = $dark
+        $isFunction[$i * $size + 6] = $true
+    }
+
+    # alignment patterns
+    $alignPositions = $script:QrAlign[$version]
+    foreach ($ar in $alignPositions) {
+        foreach ($ac in $alignPositions) {
+            $onFinder = (($ar -eq 6 -and $ac -eq 6) -or
+                         ($ar -eq 6 -and $ac -eq ($size - 7)) -or
+                         ($ar -eq ($size - 7) -and $ac -eq 6))
+            if ($onFinder) { continue }
+            for ($dr = -2; $dr -le 2; $dr++) {
+                for ($dc = -2; $dc -le 2; $dc++) {
+                    $dark = ([math]::Max([math]::Abs($dr), [math]::Abs($dc)) -ne 1)
+                    $modules[($ar + $dr) * $size + ($ac + $dc)] = $dark
+                    $isFunction[($ar + $dr) * $size + ($ac + $dc)] = $true
+                }
+            }
+        }
+    }
+
+    # reserve the format information area (filled in later, per mask)
+    for ($i = 0; $i -le 8; $i++) {
+        if ($i -ne 6) {
+            $isFunction[8 * $size + $i] = $true
+            $isFunction[$i * $size + 8] = $true
+        }
+    }
+    for ($i = 0; $i -lt 8; $i++) {
+        $isFunction[8 * $size + ($size - 1 - $i)] = $true
+        $isFunction[($size - 1 - $i) * $size + 8] = $true
+    }
+
+    # version information
+    if ($version -ge 7) {
+        $vbits = Get-QrVersionBits $version
+        for ($i = 0; $i -lt 18; $i++) {
+            $bit = ((($vbits -shr $i) -band 1) -eq 1)
+            $row = [math]::Floor($i / 3)
+            $col = ($i % 3) + ($size - 11)
+            $modules[$row * $size + $col] = $bit
+            $isFunction[$row * $size + $col] = $true
+            $modules[$col * $size + $row] = $bit
+            $isFunction[$col * $size + $row] = $true
+        }
+    }
+
+    # place data bits in the zigzag order
+    $dataBits = New-Object System.Collections.Generic.List[bool]
+    foreach ($cw in $final) {
+        for ($i = 7; $i -ge 0; $i--) { $dataBits.Add((($cw -shr $i) -band 1) -eq 1) }
+    }
+
+    $bitIndex = 0
+    $upward = $true
+    for ($col = ($size - 1); $col -gt 0; $col -= 2) {
+        if ($col -eq 6) { $col-- }
+        for ($i = 0; $i -lt $size; $i++) {
+            $row = $i
+            if ($upward) { $row = $size - 1 - $i }
+            foreach ($c in @($col, ($col - 1))) {
+                if ($isFunction[$row * $size + $c]) { continue }
+                $value = $false
+                if ($bitIndex -lt $dataBits.Count) { $value = $dataBits[$bitIndex] }
+                $modules[$row * $size + $c] = $value
+                $bitIndex++
+            }
+        }
+        $upward = -not $upward
+    }
+
+    # evaluate all eight masks, keep the best-scoring one
+    $bestMask = 0
+    $bestScore = [int]::MaxValue
+    $bestModules = $null
+    for ($mask = 0; $mask -lt 8; $mask++) {
+        $candidate = New-Object 'bool[]' -ArgumentList ($size * $size)
+        for ($r = 0; $r -lt $size; $r++) {
+            for ($c = 0; $c -lt $size; $c++) {
+                $index = $r * $size + $c
+                $value = $modules[$index]
+                if (-not $isFunction[$index] -and (Get-QrMaskBit $mask $r $c)) { $value = -not $value }
+                $candidate[$index] = $value
+            }
+        }
+        $score = Get-QrPenalty $candidate $reserved $size
+        if ($score -lt $bestScore) {
+            $bestScore = $score
+            $bestMask = $mask
+            $bestModules = $candidate
+        }
+    }
+
+    # write the format information for the chosen mask
+    $fmt = Get-QrFormatBits $bestMask
+    $fmtBits = @()
+    for ($i = 0; $i -lt 15; $i++) { $fmtBits += ((($fmt -shr $i) -band 1) -eq 1) }
+
+    # vertical copy: bits 0..5 -> col 8 rows 0..5, bits 6,7 -> rows 7,8, bits 8..14 -> rows size-15+i
+    for ($i = 0; $i -lt 15; $i++) {
+        if ($i -lt 6) { $row = $i }
+        elseif ($i -lt 8) { $row = $i + 1 }
+        else { $row = $size - 15 + $i }
+        $bestModules[$row * $size + 8] = $fmtBits[$i]
+    }
+    # horizontal copy: bits 0..7 -> row 8 from the right edge, bit 8 -> col 7, bits 9..14 -> cols 5..0
+    for ($i = 0; $i -lt 15; $i++) {
+        if ($i -lt 8) { $col = $size - 1 - $i }
+        elseif ($i -lt 9) { $col = 7 }
+        else { $col = 15 - $i - 1 }
+        $bestModules[8 * $size + $col] = $fmtBits[$i]
+    }
+    $bestModules[($size - 8) * $size + 8] = $true     # dark module
+
+    return [pscustomobject]@{
+        Size    = $size
+        Version = $version
+        Mask    = $bestMask
+        Modules = $bestModules
+    }
+}
+
+function Write-QrPng([string]$Text, [string]$Path, [int]$BoxSize = 8) {
+    Add-Type -AssemblyName System.Drawing
+    $qr = New-QrMatrix $Text
+    $quiet = 4
+    $pixels = ($qr.Size + 2 * $quiet) * $BoxSize
+
+    $bmp = New-Object System.Drawing.Bitmap $pixels, $pixels
+    $graphics = [System.Drawing.Graphics]::FromImage($bmp)
+    $brush = New-Object System.Drawing.SolidBrush ([System.Drawing.Color]::FromArgb(0, 0, 0))
+    try {
+        $graphics.Clear([System.Drawing.Color]::White)
+        for ($r = 0; $r -lt $qr.Size; $r++) {
+            for ($c = 0; $c -lt $qr.Size; $c++) {
+                if ($qr.Modules[$r * $qr.Size + $c]) {
+                    $graphics.FillRectangle($brush,
+                        (($c + $quiet) * $BoxSize), (($r + $quiet) * $BoxSize), $BoxSize, $BoxSize)
+                }
+            }
+        }
+        $bmp.Save($Path, [System.Drawing.Imaging.ImageFormat]::Png)
+    }
+    finally {
+        $brush.Dispose()
+        $graphics.Dispose()
+        $bmp.Dispose()
     }
 }
 
@@ -564,8 +916,7 @@ function Select-InteractiveClient {
 }
 
 function Invoke-MenuInitServer {
-    $serverName = Read-Choice 'Server name'
-    if ([string]::IsNullOrWhiteSpace($serverName)) { return }
+    $serverName = Read-ChoiceDefault 'Server name' 'wg-home'
     $endpointValue = Read-Choice 'Endpoint (host:port), e.g. vpn.example.com:51820'
     if ([string]::IsNullOrWhiteSpace($endpointValue)) { Write-Host 'Endpoint is required.'; return }
 
@@ -575,7 +926,9 @@ function Invoke-MenuInitServer {
     $Endpoint = $endpointValue
     $Address = Read-ChoiceDefault 'Server address (CIDR)' $Address
     $ListenPort = [int]$portValue
-    $DNS = Read-ChoiceDefault 'DNS for clients' $DNS
+    # by default the clients use the server itself as their DNS server
+    $serverAddress = ($Address -split '/')[0].Trim()
+    $DNS = Read-ChoiceDefault 'DNS for clients' $serverAddress
     $ClientAllowedIPs = Read-ChoiceDefault 'Client AllowedIPs' $ClientAllowedIPs
 
     Initialize-Server $serverName
@@ -604,7 +957,7 @@ function Invoke-MenuListItem([string]$ServerName) {
 }
 
 function Invoke-MenuClientAction {
-    param([ValidateSet('show','export','qr','enable','disable','remove')][string]$Kind)
+    param([ValidateSet('show','export','remove')][string]$Kind)
 
     $serverName = Select-InteractiveServer
     if (-not $serverName) { return }
@@ -621,19 +974,12 @@ function Invoke-MenuClientAction {
             Write-Host "`nStatus: $(if (Find-Peer $conf $clientName) { 'Enabled' } else { 'Disabled' })"
         }
         'export' { Write-Host (Resolve-Path -LiteralPath $path).Path }
-        'qr' {
-            $qr = Get-Command 'qrencode.exe' -ErrorAction SilentlyContinue
-            if (-not $qr) { $qr = Get-Command 'qrencode' -ErrorAction SilentlyContinue }
-            if (-not $qr) { throw 'qrencode not found. Install qrencode and add it to PATH.' }
-            & $qr.Source '-t' 'ansiutf8' '-r' $path
-            if ($LASTEXITCODE -ne 0) { throw 'qrencode failed.' }
-        }
-        'enable'  { Set-ClientEnabled $serverName $clientName $true }
-        'disable' { Set-ClientEnabled $serverName $clientName $false }
         'remove'  {
             $confirm = Read-Host "Permanently remove client '$clientName' from '$serverName'? Type YES"
             if ($confirm -cne 'YES') { Write-Host 'Cancelled.'; return }
             Remove-Item -LiteralPath $path -Force
+            $qrPath = Join-Path (Get-ServerDir $serverName) "$clientName.png"
+            if (Test-Path -LiteralPath $qrPath) { Remove-Item -LiteralPath $qrPath -Force }
             if (Find-Peer $conf $clientName) {
                 $conf.Peers = @($conf.Peers | Where-Object { $_.Name -ne $clientName })
                 Write-ServerConf $conf
@@ -656,10 +1002,7 @@ function Invoke-InteractiveMenu {
         Write-Host '  3) list clients'
         Write-Host '  4) show client config'
         Write-Host '  5) export client path'
-        Write-Host '  6) show client QR'
-        Write-Host '  7) enable client'
-        Write-Host '  8) disable client'
-        Write-Host '  9) remove client'
+        Write-Host '  6) remove client'
         Write-Host '  0) exit'
 
         $choice = Read-Choice 'Choice'
@@ -678,10 +1021,7 @@ function Invoke-InteractiveMenu {
                 }
                 '4' { Invoke-MenuClientAction 'show' }
                 '5' { Invoke-MenuClientAction 'export' }
-                '6' { Invoke-MenuClientAction 'qr' }
-                '7' { Invoke-MenuClientAction 'enable' }
-                '8' { Invoke-MenuClientAction 'disable' }
-                '9' { Invoke-MenuClientAction 'remove' }
+                '6' { Invoke-MenuClientAction 'remove' }
                 default { Write-Host 'Unknown choice.' -ForegroundColor Yellow }
             }
         }
@@ -734,24 +1074,6 @@ switch ("$Action $Operation") {
         $path = Get-ClientConfPath $Server $Name
         if (-not (Test-Path -LiteralPath $path)) { throw "Client config not found: $path" }
         Write-Host (Resolve-Path -LiteralPath $path).Path
-    }
-    'client qr' {
-        if (-not $Server -or -not $Name) { throw 'Usage: client qr <server> <client>' }
-        $path = Get-ClientConfPath $Server $Name
-        if (-not (Test-Path -LiteralPath $path)) { throw "Client config not found: $path" }
-        $qr = Get-Command 'qrencode.exe' -ErrorAction SilentlyContinue
-        if (-not $qr) { $qr = Get-Command 'qrencode' -ErrorAction SilentlyContinue }
-        if (-not $qr) { throw 'qrencode not found. Install qrencode and add it to PATH.' }
-        & $qr.Source '-t' 'ansiutf8' '-r' $path
-        if ($LASTEXITCODE -ne 0) { throw 'qrencode failed.' }
-    }
-    'client disable' {
-        if (-not $Server -or -not $Name) { throw 'Usage: client disable <server> <client>' }
-        Set-ClientEnabled $Server $Name $false
-    }
-    'client enable' {
-        if (-not $Server -or -not $Name) { throw 'Usage: client enable <server> <client>' }
-        Set-ClientEnabled $Server $Name $true
     }
     'client remove' {
         if (-not $Server -or -not $Name) { throw 'Usage: client remove <server> <client>' }

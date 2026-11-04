@@ -26,7 +26,6 @@ $login = Read-Host 'Login (Enter = admin)'
 if (-not $login) { $login = 'admin' }
 $sec = Read-Host 'Password' -AsSecureString
 $pass = [System.Net.NetworkCredential]::new('', $sec).Password
-$iface = Read-Host 'VPN interface to route all lists through, e.g. Wireguard2 (Enter = do not assign routes)'
 
 $base = "http://$ip"
 $sess = New-Object Microsoft.PowerShell.Commands.WebRequestSession
@@ -59,6 +58,45 @@ if ($needAuth) {
         Invoke-WebRequest "$base/auth" -Method Post -Body $body -ContentType 'application/json' -WebSession $sess -UseBasicParsing | Out-Null
     } catch { throw 'Authentication failed: wrong login or password.' }
 }
+
+# --- interface selection (after login, so the router can list its interfaces) ---
+$ifaceChoices = @()
+$ifaceDescr = @{}
+try {
+    $ifaceInfo = Invoke-RestMethod "$base/rci/show/interface" -WebSession $sess
+    foreach ($p in $ifaceInfo.PSObject.Properties) {
+        if (-not $p.Name -or $p.Name -like '*/*') { continue }
+        $ifaceChoices += $p.Name
+        if ($p.Value -and $p.Value.description) { $ifaceDescr[$p.Name] = [string]$p.Value.description }
+    }
+    $ifaceChoices = @($ifaceChoices | Sort-Object -Unique)
+} catch {
+    Write-Warning "Could not read the interface list: $($_.Exception.Message)"
+}
+
+# an interface with "awg" in its name (AmneziaWG) is offered as the default
+$defaultIface = @($ifaceChoices | Where-Object { $_ -match 'awg' }) | Select-Object -First 1
+
+if ($ifaceChoices.Count -gt 0) {
+    Write-Host ''
+    Write-Host 'Interfaces:'
+    foreach ($n in $ifaceChoices) {
+        $d = ''
+        if ($ifaceDescr.ContainsKey($n)) { $d = "  ($($ifaceDescr[$n]))" }
+        $m = ''
+        if ($defaultIface -and $n -eq $defaultIface) { $m = '  <- default' }
+        Write-Host ("  {0}{1}{2}" -f $n, $d, $m)
+    }
+}
+
+if ($defaultIface) {
+    $iface = (Read-Host "VPN interface to route all lists through, e.g. $defaultIface (Enter = $defaultIface)").Trim()
+    if (-not $iface) { $iface = $defaultIface }
+}
+else {
+    $iface = (Read-Host 'VPN interface to route all lists through, e.g. Wireguard2 (Enter = do not assign routes)').Trim()
+}
+if ($iface) { Write-Host "Interface for DNS routes: $iface" }
 
 # Sends commands in one request (context is kept between them). Returns number of failed commands.
 function Invoke-Rci([string[]]$cmds) {

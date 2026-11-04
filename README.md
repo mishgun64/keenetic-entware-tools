@@ -160,6 +160,7 @@ What do you want to do?
 | Вопрос | По умолчанию |
 |---|---|
 | Server name | `wg-home` |
+| Endpoint host | (обязательно), только хост без порта |
 | Listen port | `51820` |
 | Server address | `10.10.0.1/24` |
 | DNS for clients | адрес сервера (`10.10.0.1`) |
@@ -170,18 +171,18 @@ What do you want to do?
 То же самое без меню, если нужно сразу выполнить конкретную операцию (например из другого скрипта):
 
 ```powershell
-& ([scriptblock]::Create((irm https://github.com/mishgun64/keenetic-entware-tools/raw/refs/heads/main/wg-manager.ps1))) server init home -Endpoint vpn.example.com:51820
+& ([scriptblock]::Create((irm https://github.com/mishgun64/keenetic-entware-tools/raw/refs/heads/main/wg-manager.ps1))) server init wg-home -Endpoint vpn.example.com
 ```
 
 ```powershell
-& ([scriptblock]::Create((irm https://github.com/mishgun64/keenetic-entware-tools/raw/refs/heads/main/wg-manager.ps1))) client add home ivan
+& ([scriptblock]::Create((irm https://github.com/mishgun64/keenetic-entware-tools/raw/refs/heads/main/wg-manager.ps1))) client add wg-home ivan
 ```
 
 Команды:
 
 | Команда | Что делает |
 |---|---|
-| `server init <server> -Endpoint host:port` | Создаёт `./<server>/server.conf` (ключи генерирует `wg genkey`/`pubkey`) |
+| `server init <server> -Endpoint host` | Создаёт `./<server>/server.conf` (ключи генерирует `wg genkey`/`pubkey`) |
 | `client add <server> <client>` | Новый клиент: ключи, PSK, свободный IP из подсети сервера, `<client>.conf` и `<client>.png` в папке сервера, пир в `server.conf` |
 | `client list <server>` | Таблица клиентов: имя, адрес, Enabled/Disabled |
 | `client show <server> <client>` | Показывает клиентский конфиг |
@@ -190,7 +191,9 @@ What do you want to do?
 
 QR-код клиента создаётся автоматически при `client add` файлом `<client>.png` рядом с конфигом. В терминал он не выводится — встроенный генератор не требует `qrencode` или других внешних программ.
 
-Параметры `server init`: `-Address 10.10.0.1/24`, `-ListenPort 51820`, `-DNS 10.10.0.1`, `-ClientAllowedIPs "0.0.0.0/0"`. `-DNS` по умолчанию берётся из адреса сервера. Адрес клиента выдаётся автоматически из подсети сервера (поддерживаются IPv4-префиксы `/16`–`/30`). Каталог хранения можно переопределить через `-Root`, путь к `wg.exe` — через `-WgPath`.
+Параметры `server init`: `-Address 10.10.0.1/24`, `-ListenPort 51820`, `-DNS 10.10.0.1`, `-ClientAllowedIPs "0.0.0.0/0"`. `-DNS` по умолчанию берётся из адреса сервера.
+
+`-Endpoint` принимает **только хост** (`vpn.example.com`): порт для клиентского `Endpoint` берётся из `-ListenPort`. Если всё же указать `host:port`, этот порт будет использован и как `ListenPort`. Адрес клиента выдаётся автоматически из подсети сервера (поддерживаются IPv4-префиксы `/16`–`/30`). Каталог хранения можно переопределить через `-Root`, путь к `wg.exe` — через `-WgPath`.
 
 Перед каждой перезаписью `server.conf` рядом сохраняется резервная копия `server.conf.<дата>-<время>.bak`.
 

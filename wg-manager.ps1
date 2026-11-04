@@ -55,10 +55,11 @@ function Show-Help {
 WireGuard Manager (local configuration files)
 
 Server:
-  .\wg-manager.ps1 server init wg-home -Endpoint vpn.example.com:51820
+  .\wg-manager.ps1 server init wg-home -Endpoint vpn.example.com
       [-Address 10.10.0.1/24] [-ListenPort 51820] [-DNS 10.10.0.1]
       [-ClientAllowedIPs "0.0.0.0/0"]
 
+  -Endpoint takes the host only; the port comes from -ListenPort.
   -DNS defaults to the server address, clients get a .png QR next to their config.
 
 Client:
@@ -113,13 +114,32 @@ function Get-WgExecutable {
 function Invoke-WgText {
     param([string[]]$WgArgs, [string]$InputText)
     $exe = Get-WgExecutable
-    if ($null -ne $InputText) {
-        $result = $InputText | & $exe @WgArgs
-    } else {
+
+    # note: [string]$null becomes "", so an empty value means "nothing to pipe"
+    if ([string]::IsNullOrEmpty($InputText)) {
         $result = & $exe @WgArgs
+        if ($LASTEXITCODE -ne 0) { throw "wg.exe failed: $($WgArgs -join ' ')" }
+        return (($result | Out-String).Trim())
     }
-    if ($LASTEXITCODE -ne 0) { throw "wg.exe failed: $($WgArgs -join ' ')" }
-    return (($result | Out-String).Trim())
+
+    # wg.exe only accepts a key on stdin coming from a file redirection: a pipe or
+    # a Process.StandardInput stream appends stray characters and it answers with
+    # "Trailing characters found after key". So the key is written to a temp file
+    # and cmd.exe redirects it into stdin.
+    $tempFile = [IO.Path]::GetTempFileName()
+    try {
+        [IO.File]::WriteAllText($tempFile, $InputText + "`n", (New-Object System.Text.UTF8Encoding $false))
+        $commandLine = '"{0}" {1} < "{2}"' -f $exe, ($WgArgs -join ' '), $tempFile
+        $result = & cmd.exe /c $commandLine 2>&1
+        if ($LASTEXITCODE -ne 0) {
+            $detail = ($result | Out-String).Trim()
+            throw ("wg.exe failed: {0} {1}" -f ($WgArgs -join ' '), $detail)
+        }
+        return (($result | Out-String).Trim())
+    }
+    finally {
+        Remove-Item -LiteralPath $tempFile -Force -ErrorAction SilentlyContinue
+    }
 }
 
 function Assert-Name {
@@ -266,6 +286,19 @@ function Read-Server {
     return $conf
 }
 
+function Read-ClientAddress {
+    param([string]$ClientConfPath)
+    $section = ''
+    foreach ($raw in @(Get-Content -LiteralPath $ClientConfPath)) {
+        $line = $raw.Trim()
+        if ($line -match '^\[(.+?)\]$') { $section = $Matches[1].ToLowerInvariant(); continue }
+        if ($section -eq 'interface' -and $line -match '^Address\s*=\s*(.+)$') {
+            return ($Matches[1].Trim() -split ',')[0].Trim()
+        }
+    }
+    throw "No Address in $ClientConfPath"
+}
+
 function Get-ClientNames {
     param([string]$ServerName)
     $dir = Get-ClientsDir $ServerName
@@ -349,8 +382,15 @@ function Get-NextClientIP {
 function Initialize-Server {
     param([string]$ServerName)
     Assert-Name $ServerName
-    if ([string]::IsNullOrWhiteSpace($Endpoint)) { throw 'Specify -Endpoint, for example vpn.example.com:51820' }
+    if ([string]::IsNullOrWhiteSpace($Endpoint)) { throw 'Specify -Endpoint, for example vpn.example.com' }
     if ($ListenPort -lt 1 -or $ListenPort -gt 65535) { throw 'ListenPort must be between 1 and 65535.' }
+    # -Endpoint accepts a host or host:port; without a port the listen port is used
+    $endpointHost = $Endpoint.Trim()
+    if ($endpointHost -match '^(.+):(\d+)$') {
+        $endpointHost = $Matches[1]
+        $ListenPort = [int]$Matches[2]
+    }
+    $Endpoint = "$endpointHost`:$ListenPort"
 
     $dir = Get-ServerDir $ServerName
     if (Test-Path -LiteralPath $dir) { throw "Directory already exists: $dir" }
@@ -917,15 +957,27 @@ function Select-InteractiveClient {
 
 function Invoke-MenuInitServer {
     $serverName = Read-ChoiceDefault 'Server name' 'wg-home'
-    $endpointValue = Read-Choice 'Endpoint (host:port), e.g. vpn.example.com:51820'
-    if ([string]::IsNullOrWhiteSpace($endpointValue)) { Write-Host 'Endpoint is required.'; return }
 
-    $portValue = Read-ChoiceDefault 'Listen port' "$ListenPort"
+    $hostValue = Read-Choice 'Endpoint host, e.g. vpn.example.com'
+    if ([string]::IsNullOrWhiteSpace($hostValue)) { Write-Host 'Endpoint host is required.'; return }
+    # an explicit host:port is accepted too, then that port wins
+    $portFromHost = $null
+    if ($hostValue -match '^(.+):(\d+)$') {
+        $hostValue = $Matches[1]
+        $portFromHost = [int]$Matches[2]
+    }
+
+    $portDefault = $ListenPort
+    if ($portFromHost) { $portDefault = $portFromHost }
+    $portValue = Read-ChoiceDefault 'Listen port' "$portDefault"
     if ($portValue -notmatch '^\d+$') { Write-Host 'Invalid port.'; return }
 
-    $Endpoint = $endpointValue
+    # the client Endpoint always uses the listen port
+    $port = [int]$portValue
+    $Endpoint = "$hostValue`:$port"
+
     $Address = Read-ChoiceDefault 'Server address (CIDR)' $Address
-    $ListenPort = [int]$portValue
+    $ListenPort = $port
     # by default the clients use the server itself as their DNS server
     $serverAddress = ($Address -split '/')[0].Trim()
     $DNS = Read-ChoiceDefault 'DNS for clients' $serverAddress

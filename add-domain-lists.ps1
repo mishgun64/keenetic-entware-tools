@@ -233,7 +233,51 @@ function Set-GroupRoute([string]$Group, [string]$Interface, [bool]$Disable) {
     return ($errors + 1)
 }
 
+# Removes every group created by this script (domain-listN) together with its route,
+# so the install always starts from scratch: domains removed from a file disappear,
+# and no stale groups/routes stay behind. Other object-groups are not touched.
+function Reset-DomainLists {
+    $names = @()
+    $cfg = Invoke-RestMethod "$base/rci/show/running-config" -WebSession $sess
+    foreach ($line in $cfg.message) {
+        if ($line -match '^\s*object-group\s+fqdn\s+(\S+)') {
+            $n = $Matches[1]
+            if ($n -match '^domain-list\d+$') { $names += $n }
+        }
+    }
+    $names = @($names | Sort-Object -Unique)
+    if ($names.Count -eq 0) {
+        Write-Host 'No old domain-list groups on the router.'
+        return
+    }
+
+    Write-Host ("Removing {0} old group(s) and their routes: {1}" -f $names.Count, ($names -join ', '))
+    # routes first: a route pointing to a deleted group must not remain
+    foreach ($n in $names) {
+        if (@(Get-GroupRoutes | Where-Object { $_.Group -eq $n }).Count -eq 0) { continue }
+        if (-not (Remove-GroupRoutes $n)) {
+            throw ("Could not remove the route of {0}, aborting. Configuration NOT saved." -f $n)
+        }
+    }
+    $null = Invoke-Rci @($names | ForEach-Object { "no object-group fqdn $_" })
+
+    $left = @()
+    $cfg = Invoke-RestMethod "$base/rci/show/running-config" -WebSession $sess
+    foreach ($line in $cfg.message) {
+        if ($line -match '^\s*object-group\s+fqdn\s+(\S+)') {
+            $n = $Matches[1]
+            if ($n -match '^domain-list\d+$') { $left += $n }
+        }
+    }
+    if ($left.Count -gt 0) {
+        throw ("Could not remove group(s): {0}, aborting. Configuration NOT saved." -f (($left | Sort-Object -Unique) -join ', '))
+    }
+    Write-Host '  ok'
+}
+
 # --- existing object-group fqdn: description -> name ---
+Reset-DomainLists
+
 $byDesc = @{}
 $used = @{}
 $rc = Invoke-RestMethod "$base/rci/show/running-config" -WebSession $sess

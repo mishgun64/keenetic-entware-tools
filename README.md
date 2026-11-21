@@ -52,12 +52,14 @@ sh -c "$(curl -fsSL https://github.com/mishgun64/keenetic-entware-tools/raw/refs
 Запуск без скачивания файла (из любой папки):
 
 ```powershell
-& ([scriptblock]::Create((irm ("https://github.com/mishgun64/keenetic-entware-tools/raw/refs/heads/main/add-domain-lists.ps1?nocache={0}" -f [DateTime]::Now.Ticks))))
+$repo = 'mishgun64/keenetic-entware-tools'
+$sha = (irm "https://api.github.com/repos/$repo/commits/main").sha
+& ([scriptblock]::Create((irm "https://raw.githubusercontent.com/$repo/$sha/add-domain-lists.ps1")))
 ```
 
 Скрипт, выполняемый из памяти, не блокируется политикой выполнения PowerShell. Списки берутся прямо из репозитория (ветка `main`, через GitHub API), локальная папка `domain-lists` не нужна. Репозиторий должен быть публичным, а у GitHub API без токена лимит 60 запросов в час на IP.
 
-Параметр `?nocache=…` обязателен: GitHub отдаёт `raw` с кэшем, и без него можно получить устаревшую копию скрипта. Первая строка вывода (`add-domain-lists vN`) показывает версию — если она не совпадает с последней в репозитории, кэш всё ещё отдаёт старое, повторите запуск.
+Адрес файла строится по SHA последнего коммита: GitHub отдаёт `raw` с кэшем, и обычный `…/refs/heads/main/add-domain-lists.ps1` может вернуть устаревшую копию (параметр `?nocache=` не помогает). Путь с SHA неизменяем, поэтому всегда скачивается актуальная версия. Первая строка вывода (`add-domain-lists vN`) показывает версию — если она не растёт после обновления, скачалась старая копия.
 
 Что спрашивает скрипт:
 

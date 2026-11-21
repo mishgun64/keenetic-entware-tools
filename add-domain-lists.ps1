@@ -6,6 +6,9 @@ $ErrorActionPreference = 'Stop'
 # lists are downloaded from this folder of the GitHub repo
 $ListsApi = 'https://api.github.com/repos/mishgun64/keenetic-entware-tools/contents/domain-lists?ref=main'
 
+# these lists are installed, but their route is created disabled (Keenetic: "route disable")
+$disabledLists = @('google', 'microsoft', 'youtube')
+
 # --- input ---
 $routers = @(
     @{ Label = '192.168.47.1';                    Ip = '192.168.47.1' },
@@ -16,16 +19,25 @@ $routers = @(
 )
 Write-Host 'Select Keenetic router:'
 for ($i = 0; $i -lt $routers.Count; $i++) { Write-Host ("  {0}) {1}" -f ($i + 1), $routers[$i].Label) }
+Write-Host ("  A) all routers (1-{0})" -f $routers.Count)
 Write-Host '  0) enter IP manually'
-$choice = Read-Host 'Number'
-if ($choice -match '^[1-9]\d*$' -and [int]$choice -le $routers.Count) { $ip = $routers[[int]$choice - 1].Ip }
-elseif ($choice -match '^\d{1,3}(\.\d{1,3}){3}$') { $ip = $choice }
-else { $ip = Read-Host 'Keenetic router IP (e.g. 192.168.1.1)' }
-Write-Host "Router: $ip"
+$choice = (Read-Host 'Number').Trim()
+if ($choice -match '^(a|all|все)$') { $targets = @($routers | ForEach-Object { $_.Ip }) }
+elseif ($choice -match '^[1-9]\d*$' -and [int]$choice -le $routers.Count) { $targets = @($routers[[int]$choice - 1].Ip) }
+elseif ($choice -match '^\d{1,3}(\.\d{1,3}){3}$') { $targets = @($choice) }
+else {
+    $manual = (Read-Host 'Keenetic router IP (e.g. 192.168.1.1)').Trim()
+    if (-not $manual) { throw 'No router IP given.' }
+    $targets = @($manual)
+}
+Write-Host ("Router(s): {0}" -f ($targets -join ', '))
 $login = Read-Host 'Login (Enter = admin)'
 if (-not $login) { $login = 'admin' }
 $sec = Read-Host 'Password' -AsSecureString
 $pass = [System.Net.NetworkCredential]::new('', $sec).Password
+
+function Install-ToRouter {
+param([string]$ip, [string]$login, [string]$pass)
 
 $base = "http://$ip"
 $sess = New-Object Microsoft.PowerShell.Commands.WebRequestSession
@@ -148,6 +160,76 @@ function Send-Rci([string[]]$cmds) {
     }
     if ($bad -gt 3) { Write-Warning "...and $($bad - 3) more errors" }
     return $bad
+}
+
+# --- routes in dns-proxy ---
+# A disabled route is written as its own line plus a following "route disable" line,
+# and "route disable" always applies to the last route of the block. The state is
+# therefore read back from running-config instead of trusting RCI statuses.
+function Get-GroupRoutes {
+    $cfg = Invoke-RestMethod "$base/rci/show/running-config" -WebSession $sess
+    $routes = New-Object System.Collections.ArrayList
+    $in = $false
+    $last = $null
+    foreach ($line in $cfg.message) {
+        if ($line -match '^\S') { $in = ($line -match '^dns-proxy\s*$'); $last = $null; continue }
+        if (-not $in) { continue }
+        $t = $line.Trim()
+        if ($t -match '^route\s+object-group\s+(\S+)') {
+            $last = [pscustomobject]@{ Group = $Matches[1]; Cmd = $t; Disabled = $false }
+            [void]$routes.Add($last)
+        }
+        elseif ($t -eq 'route disable' -and $last) { $last.Disabled = $true; $last = $null }
+        else { $last = $null }
+    }
+    return $routes
+}
+
+# Removes every route of one group. Removal spelling differs between KeeneticOS builds,
+# so several variants are tried and success is judged by re-reading the config.
+function Remove-GroupRoutes([string]$Group) {
+    $cur = @(Get-GroupRoutes | Where-Object { $_.Group -eq $Group })
+    if ($cur.Count -eq 0) { return $true }
+    $variants = @()
+    $variants += ,(@('dns-proxy') + @($cur | ForEach-Object { "no $($_.Cmd)" }) + @('exit'))
+    $variants += ,@('dns-proxy', "no route object-group $Group", 'exit')
+    $variants += ,@("no route object-group $Group")
+    foreach ($v in $variants) {
+        $null = Invoke-Rci $v
+        if (@(Get-GroupRoutes | Where-Object { $_.Group -eq $Group }).Count -eq 0) { return $true }
+    }
+    return $false
+}
+
+# Makes the route of one group point to <Interface> and match the requested state.
+# A matching route is left untouched, so a rerun does not touch the router.
+# A differing route is removed and re-added at the end of the block, because only
+# the last route can be addressed by "route disable".
+function Set-GroupRoute([string]$Group, [string]$Interface, [bool]$Disable) {
+    $want = "route object-group $Group $Interface auto"
+    $cur = @(Get-GroupRoutes | Where-Object { $_.Group -eq $Group })
+    if ($cur.Count -eq 1 -and $cur[0].Cmd -eq $want -and [bool]$cur[0].Disabled -eq $Disable) { return 0 }
+
+    $errors = 0
+    for ($attempt = 1; $attempt -le 2; $attempt++) {
+        if (-not (Remove-GroupRoutes $Group)) {
+            Write-Warning ("route {0}: could not remove the old route" -f $Group)
+            return ($errors + 1)
+        }
+        $cmds = @('dns-proxy', $want)
+        if ($Disable) { $cmds += 'route disable' }
+        $cmds += 'exit'
+        $errors += Send-Rci $cmds
+
+        $now = @(Get-GroupRoutes | Where-Object { $_.Group -eq $Group })
+        if ($now.Count -eq 1 -and $now[0].Cmd -eq $want -and [bool]$now[0].Disabled -eq $Disable) { return $errors }
+        if ($attempt -lt 2) {
+            Write-Warning ("route {0}: {1} entr(ies) after update (disabled={2}), retrying" -f `
+                $Group, $now.Count, (($now | ForEach-Object { $_.Disabled }) -join ','))
+        }
+    }
+    Write-Warning ("route {0}: could not set state (disabled={1})" -f $Group, $Disable)
+    return ($errors + 1)
 }
 
 # --- existing object-group fqdn: description -> name ---
@@ -433,10 +515,29 @@ foreach ($entry in $listing) {
         $cmds += 'exit'
         $errors += Send-Rci $cmds
     }
-    if ($iface) { $errors += Send-Rci @('dns-proxy', "route object-group $name $iface auto", 'exit') }
+    if ($iface) {
+        $disableRoute = ($disabledLists -contains $desc)
+        if ($disableRoute) { Write-Host "  route: disabled" }
+        $errors += Set-GroupRoute -Group $name -Interface $iface -Disable $disableRoute
+    }
 
     if ($errors -gt 0) { throw "[$desc] failed, aborting. Configuration NOT saved." }
 }
 
 [void](Send-Rci @('system configuration save'))
 Write-Host 'Done, configuration saved.'
+}
+
+# --- run ---
+$failed = @()
+foreach ($ip in $targets) {
+    Write-Host ''
+    Write-Host ("=== {0} ===" -f $ip)
+    try { Install-ToRouter -ip $ip -login $login -pass $pass }
+    catch {
+        Write-Warning ("[{0}] {1}" -f $ip, $_.Exception.Message)
+        $failed += $ip
+    }
+}
+if ($failed.Count -gt 0) { throw ("Failed on: {0}" -f ($failed -join ', ')) }
+Write-Host ("All done, configuration saved on: {0}" -f ($targets -join ', '))

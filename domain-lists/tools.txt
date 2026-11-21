@@ -70,6 +70,7 @@ strava.com
 trainingpeaks.com
 tuta.com
 tutanota.com
+virustotal.com
 wdfiles.com
 web-platform.io
 whoop.com

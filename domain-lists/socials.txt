@@ -23,7 +23,6 @@ fbcdn.net
 fbsbx.com
 feelinsonice.com
 gethornet.com
-google.com
 hornet-live.com
 hornet.com
 ibytedtos.com
@@ -87,3 +86,4 @@ twitter.com
 worldfcdn.com
 worldfcdn2.com
 x.com
+xdaforums.com

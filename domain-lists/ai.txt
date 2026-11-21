@@ -67,5 +67,7 @@ perplexity.ai
 perplexity.com
 pollo.ai
 pplx.ai
+qwencloud.com
+qwencloudapi.com
 todesktop.com
 x.ai

@@ -235,6 +235,36 @@ function Remove-GroupRoutes([string]$Group) {
     return $false
 }
 
+# Makes the route of one group point to <Interface> and match the requested state.
+# A matching route is left untouched. A differing route is removed and re-added at
+# the end of the block, because only the last route can be addressed by "route disable".
+function Set-GroupRoute([string]$Group, [string]$Interface, [bool]$Disable) {
+    $want = "route object-group $Group $Interface auto"
+    $cur = @(Get-GroupRoutes | Where-Object { $_.Group -eq $Group })
+    if ($cur.Count -eq 1 -and $cur[0].Cmd -eq $want -and [bool]$cur[0].Disabled -eq $Disable) { return 0 }
+
+    $errors = 0
+    for ($attempt = 1; $attempt -le 2; $attempt++) {
+        if (-not (Remove-GroupRoutes $Group)) {
+            Write-Warning ("route {0}: could not remove the old route" -f $Group)
+            return ($errors + 1)
+        }
+        $cmds = @('dns-proxy', $want)
+        if ($Disable) { $cmds += 'route disable' }
+        $cmds += 'exit'
+        $errors += Send-Rci $cmds
+
+        $now = @(Get-GroupRoutes | Where-Object { $_.Group -eq $Group })
+        if ($now.Count -eq 1 -and $now[0].Cmd -eq $want -and [bool]$now[0].Disabled -eq $Disable) { return $errors }
+        if ($attempt -lt 2) {
+            Write-Warning ("route {0}: {1} entr(ies) after update (disabled={2}), retrying" -f `
+                $Group, $now.Count, (($now | ForEach-Object { $_.Disabled }) -join ','))
+        }
+    }
+    Write-Warning ("route {0}: could not set state (disabled={1})" -f $Group, $Disable)
+    return ($errors + 1)
+}
+
 # Rebuilds dns-proxy without the routes of the given groups. Fallback for builds where
 # the CLI refuses to remove a dns-proxy route: the rest of the block (upstreams,
 # rebind-protect, filter, other routes) is kept.

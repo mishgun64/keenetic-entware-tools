@@ -4,7 +4,7 @@ $ErrorActionPreference = 'Stop'
 [Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12
 
 # shown at start so that a stale (cached) copy is easy to spot
-$ScriptVersion = 'v4'
+$ScriptVersion = 'v5'
 Write-Host ("add-domain-lists {0}" -f $ScriptVersion)
 
 # lists are downloaded from this folder of the GitHub repo
@@ -12,6 +12,17 @@ $ListsApi = 'https://api.github.com/repos/mishgun64/keenetic-entware-tools/conte
 
 # these lists are installed, but their route is created disabled (Keenetic: "route disable")
 $disabledLists = @('google', 'microsoft', 'youtube')
+
+# --- what to do ---
+$reserveIfaceName = 'awg-reserve'
+
+Write-Host ''
+Write-Host 'What to do?'
+Write-Host '  1) add/update lists and their routes (full install)'
+Write-Host ("  2) switch existing list routes to the reserve interface ({0})" -f $reserveIfaceName)
+$modeChoice = (Read-Host 'Number (Enter = 1)').Trim()
+$mode = 'install'
+if ($modeChoice -eq '2' -or $modeChoice -match '^(s|switch|reserve|резерв)') { $mode = 'switch' }
 
 # --- input ---
 $routers = @(
@@ -41,14 +52,8 @@ if (-not $login) { $login = 'admin' }
 $sec = Read-Host 'Password' -AsSecureString
 $pass = [System.Net.NetworkCredential]::new('', $sec).Password
 
-function Install-ToRouter {
-param([string]$ip, [string]$login, [string]$pass)
-
-$base = "http://$ip"
-$sess = New-Object Microsoft.PowerShell.Commands.WebRequestSession
-
-# PS 5.1 decodes JSON as Latin-1 when the response has no charset, so UTF-8 is decoded manually
 try { [Console]::OutputEncoding = [Text.Encoding]::UTF8 } catch { }
+
 function Get-Utf8Json([string]$path) {
     $resp = Invoke-WebRequest "$base$path" -WebSession $sess -UseBasicParsing
     $text = [Text.Encoding]::UTF8.GetString($resp.RawContentStream.ToArray()).TrimStart([char]0xFEFF)
@@ -60,12 +65,14 @@ function Get-Hdr($err, $name) {
     if ($h -is [System.Net.WebHeaderCollection]) { return $h[$name] }
     return ($h.GetValues($name) | Select-Object -First 1)
 }
+
 function Get-Hash($algo, [string]$s) {
     $a = [System.Security.Cryptography.HashAlgorithm]::Create($algo)
     -join ($a.ComputeHash([Text.Encoding]::UTF8.GetBytes($s)) | ForEach-Object { $_.ToString('x2') })
 }
 
 # --- auth (challenge-response) ---
+function Connect-Session([string]$base, $sess, [string]$login, [string]$pass, [string]$ip) {
 $needAuth = $false
 try {
     Invoke-WebRequest "$base/auth" -WebSession $sess -UseBasicParsing | Out-Null
@@ -83,75 +90,15 @@ if ($needAuth) {
         Invoke-WebRequest "$base/auth" -Method Post -Body $body -ContentType 'application/json' -WebSession $sess -UseBasicParsing | Out-Null
     } catch { throw 'Authentication failed: wrong login or password.' }
 }
-
-# --- interface selection (after login, so the router can list its interfaces) ---
-$ifaceChoices = @()
-$ifaceDescr = @{}
-$ifaceText = @{}
-try {
-    $ifaceInfo = Get-Utf8Json '/rci/show/interface'
-    foreach ($p in $ifaceInfo.PSObject.Properties) {
-        # skip nested subtrees (name/subname) and pure numbers (ports are not VPN interfaces)
-        if (-not $p.Name -or $p.Name -like '*/*' -or $p.Name -match '^\d+$') { continue }
-        $ifaceChoices += $p.Name
-        $text = $p.Name
-        if ($p.Value) {
-            if ($p.Value.description) {
-                $ifaceDescr[$p.Name] = [string]$p.Value.description
-                $text += ' ' + $p.Value.description
-            }
-            # "awg" may sit in any field (description, comment, ...), so scan the whole object
-            try { $text += ' ' + ($p.Value | ConvertTo-Json -Depth 3 -Compress) } catch { }
-        }
-        $ifaceText[$p.Name] = $text
-    }
-    $ifaceChoices = @($ifaceChoices | Sort-Object -Unique)
-} catch {
-    Write-Warning "Could not read the interface list: $($_.Exception.Message)"
 }
 
-# an interface with "awg" anywhere in its name/fields (AmneziaWG, e.g. Wireguard2 "public-awg")
-# is used as the default
-$defaultIface = @($ifaceChoices | Where-Object { $ifaceText[$_] -match 'awg' }) | Select-Object -First 1
-$defaultLabel = ''
-if ($defaultIface) {
-    $defaultLabel = $defaultIface
-    if ($ifaceDescr.ContainsKey($defaultIface)) { $defaultLabel += " ($($ifaceDescr[$defaultIface]))" }
-}
-
-if ($ifaceChoices.Count -gt 0) {
-    Write-Host ''
-    Write-Host 'Interfaces:'
-    foreach ($n in $ifaceChoices) {
-        $d = ''
-        if ($ifaceDescr.ContainsKey($n)) { $d = "  ($($ifaceDescr[$n]))" }
-        $m = ''
-        if ($n -eq $defaultIface) { $m = '  <- default' }
-        Write-Host ("  {0}{1}{2}" -f $n, $d, $m)
-    }
-}
-
-if ($defaultIface) {
-    Write-Host ''
-    Write-Host "Default interface (name or description contains 'awg'): $defaultLabel"
-    $iface = (Read-Host "VPN interface to route all lists through, e.g. $defaultLabel (Enter = $defaultLabel)").Trim()
-    if (-not $iface) { $iface = $defaultIface }
-}
-else {
-    $iface = (Read-Host 'VPN interface to route all lists through, e.g. Wireguard2 (Enter = do not assign routes)').Trim()
-}
-if ($iface) {
-    if ($ifaceDescr.ContainsKey($iface)) { Write-Host "Interface for DNS routes: $iface ($($ifaceDescr[$iface]))" }
-    else { Write-Host "Interface for DNS routes: $iface" }
-}
-
-# Sends commands in one request (context is kept between them). Returns number of failed commands.
 function Invoke-Rci([string[]]$cmds) {
     $arr = @($cmds | ForEach-Object { @{ parse = $_ } })
     $json = ConvertTo-Json -InputObject $arr -Compress
     return @(Invoke-RestMethod "$base/rci/" -Method Post -Body ([Text.Encoding]::UTF8.GetBytes($json)) `
         -ContentType 'application/json; charset=utf-8' -WebSession $sess)
 }
+
 function Send-Rci([string[]]$cmds) {
     $res = Invoke-Rci $cmds
     $bad = 0
@@ -305,6 +252,89 @@ function Get-DomainListGroups {
     }
     return @($names | Sort-Object -Unique)
 }
+
+function Install-ToRouter {
+param([string]$ip, [string]$login, [string]$pass)
+
+$base = "http://$ip"
+$sess = New-Object Microsoft.PowerShell.Commands.WebRequestSession
+Connect-Session -base $base -sess $sess -login $login -pass $pass -ip $ip
+
+
+# PS 5.1 decodes JSON as Latin-1 when the response has no charset, so UTF-8 is decoded manually
+
+
+
+
+
+
+
+# --- interface selection ---
+$ifaceChoices = @()
+$ifaceDescr = @{}
+$ifaceText = @{}
+try {
+    $ifaceInfo = Get-Utf8Json '/rci/show/interface'
+    foreach ($p in $ifaceInfo.PSObject.Properties) {
+        # skip nested subtrees (name/subname) and pure numbers (ports are not VPN interfaces)
+        if (-not $p.Name -or $p.Name -like '*/*' -or $p.Name -match '^\d+$') { continue }
+        $ifaceChoices += $p.Name
+        $text = $p.Name
+        if ($p.Value) {
+            if ($p.Value.description) {
+                $ifaceDescr[$p.Name] = [string]$p.Value.description
+                $text += ' ' + $p.Value.description
+            }
+            # "awg" may sit in any field (description, comment, ...), so scan the whole object
+            try { $text += ' ' + ($p.Value | ConvertTo-Json -Depth 3 -Compress) } catch { }
+        }
+        $ifaceText[$p.Name] = $text
+    }
+    $ifaceChoices = @($ifaceChoices | Sort-Object -Unique)
+} catch {
+    Write-Warning "Could not read the interface list: $($_.Exception.Message)"
+}
+
+# an interface with "awg" anywhere in its name/fields (AmneziaWG, e.g. Wireguard2 "public-awg")
+# is used as the default
+$defaultIface = @($ifaceChoices | Where-Object { $ifaceText[$_] -match 'awg' }) | Select-Object -First 1
+$defaultLabel = ''
+if ($defaultIface) {
+    $defaultLabel = $defaultIface
+    if ($ifaceDescr.ContainsKey($defaultIface)) { $defaultLabel += " ($($ifaceDescr[$defaultIface]))" }
+}
+
+if ($ifaceChoices.Count -gt 0) {
+    Write-Host ''
+    Write-Host 'Interfaces:'
+    foreach ($n in $ifaceChoices) {
+        $d = ''
+        if ($ifaceDescr.ContainsKey($n)) { $d = "  ($($ifaceDescr[$n]))" }
+        $m = ''
+        if ($n -eq $defaultIface) { $m = '  <- default' }
+        Write-Host ("  {0}{1}{2}" -f $n, $d, $m)
+    }
+}
+
+if ($defaultIface) {
+    Write-Host ''
+    Write-Host "Default interface (name or description contains 'awg'): $defaultLabel"
+    $iface = (Read-Host "VPN interface to route all lists through, e.g. $defaultLabel (Enter = $defaultLabel)").Trim()
+    if (-not $iface) { $iface = $defaultIface }
+}
+else {
+    $iface = (Read-Host 'VPN interface to route all lists through, e.g. Wireguard2 (Enter = do not assign routes)').Trim()
+}
+if ($iface) {
+    if ($ifaceDescr.ContainsKey($iface)) { Write-Host "Interface for DNS routes: $iface ($($ifaceDescr[$iface]))" }
+    else { Write-Host "Interface for DNS routes: $iface" }
+}
+
+# Sends commands in one request (context is kept between them). Returns number of failed commands.
+
+
+
+
 
 # Removes every group created by this script (domain-listN) together with its route,
 # so the install always starts from scratch: domains removed from a file disappear,
@@ -661,16 +691,139 @@ foreach ($entry in $listing) {
 Write-Host 'Done, configuration saved.'
 }
 
+# Switches the routes of all installed lists (domain-listN) to another interface,
+# keeping their enabled/disabled state. The dns-proxy block is rebuilt line by line:
+# this also works on builds that refuse "no route object-group ...", and it keeps
+# DoH upstreams, rebind-protect, filter and routes of other groups.
+function Switch-ToReserve {
+param([string]$ip, [string]$login, [string]$pass, [string]$preferred)
+
+$base = "http://$ip"
+$sess = New-Object Microsoft.PowerShell.Commands.WebRequestSession
+Connect-Session -base $base -sess $sess -login $login -pass $pass -ip $ip
+
+# --- interfaces ---
+$ifaces = @{}
+try {
+    $info = Get-Utf8Json '/rci/show/interface'
+    foreach ($p in $info.PSObject.Properties) {
+        if (-not $p.Name -or $p.Name -like '*/*' -or $p.Name -match '^\d+$') { continue }
+        $d = ''
+        if ($p.Value -and $p.Value.description) { $d = [string]$p.Value.description }
+        $ifaces[$p.Name] = $d
+    }
+} catch { Write-Warning "Could not read the interface list: $($_.Exception.Message)" }
+
+# default target: name or description contains "awg-reserve"
+$reserve = $null
+if ($preferred) {
+    foreach ($n in $ifaces.Keys) {
+        if ($n -eq $preferred -or "$n $($ifaces[$n])" -match [regex]::Escape($preferred)) { $reserve = $n; break }
+    }
+}
+
+if ($ifaces.Count -gt 0) {
+    Write-Host ''
+    Write-Host 'Interfaces:'
+    foreach ($n in (@($ifaces.Keys) | Sort-Object)) {
+        $d = ''
+        if ($ifaces[$n]) { $d = "  ($($ifaces[$n]))" }
+        $m = ''
+        if ($n -eq $reserve) { $m = '  <- reserve' }
+        Write-Host ("  {0}{1}{2}" -f $n, $d, $m)
+    }
+}
+
+$routes = @(Get-GroupRoutes | Where-Object { $_.Group -match '^domain-list\d+$' })
+if ($routes.Count -eq 0) {
+    Write-Warning 'No list routes on the router (domain-listN), nothing to switch.'
+    return
+}
+
+if ($reserve) {
+    Write-Host ''
+    Write-Host ("Reserve interface: {0}" -f $reserve)
+    $answer = (Read-Host "Interface to switch list routes to (Enter = $reserve)").Trim()
+    $target = $answer
+    if (-not $target) { $target = $reserve }
+}
+else {
+    Write-Warning ("No interface with '{0}' in its name or description found." -f $preferred)
+    $target = (Read-Host 'Interface to switch list routes to (Enter = cancel)').Trim()
+}
+if (-not $target) { Write-Host 'Cancelled.'; return }
+if ($ifaces.Count -gt 0 -and -not $ifaces.ContainsKey($target)) {
+    Write-Warning ("Interface {0} is not in the router interface list, trying anyway" -f $target)
+}
+
+# --- rewrite the route lines of the lists ---
+$cfg = Invoke-RestMethod "$base/rci/show/running-config" -WebSession $sess
+$keep = @()
+$in = $false
+$changed = 0
+foreach ($line in $cfg.message) {
+    if ($line -match '^\S') { $in = ($line -match '^dns-proxy\s*$'); continue }
+    if (-not $in) { continue }
+    $t = $line.Trim()
+    if ($t -eq '!') { continue }
+    if ($t -match '^route\s+object-group\s+(\S+)\s+(\S+)(.*)$') {
+        $g = $Matches[1]
+        $oldIface = $Matches[2]
+        # keep the trailing part (usually " auto"); note that any later -match
+        # overwrites $Matches, so it is copied first
+        $suffix = $Matches[3]
+        if ($g -match '^domain-list\d+$') {
+            $newLine = "route object-group $g $target" + $suffix
+            if ($t -ne $newLine) {
+                Write-Host ("  {0}: {1} -> {2}" -f $g, $oldIface, $target)
+                $changed++
+            }
+            $t = $newLine
+        }
+    }
+    $keep += $t
+}
+
+if ($changed -eq 0) {
+    Write-Host ("All list routes already use {0}, nothing to change." -f $target)
+    Write-Host 'Configuration NOT saved (no changes).'
+    return
+}
+
+Write-Host ("Switching {0} route(s) to {1}..." -f $changed, $target)
+$null = Invoke-Rci @('no dns-proxy')
+if ($keep.Count -gt 0) {
+    $res = Invoke-Rci (@('dns-proxy') + $keep + @('exit'))
+    $errs = @(Get-RciErrors $res)
+    if ($errs.Count -gt 0) {
+        throw ("Rebuilding dns-proxy failed: {0}. Configuration NOT saved." -f (($errs | Select-Object -Unique | Select-Object -First 3) -join '; '))
+    }
+}
+
+# --- verify: same count, every route on the target interface ---
+$now = @(Get-GroupRoutes | Where-Object { $_.Group -match '^domain-list\d+$' })
+$bad = @($now | Where-Object { $_.Cmd -notmatch ('^route\s+object-group\s+' + [regex]::Escape($_.Group) + '\s+' + [regex]::Escape($target) + '(\s|$)') })
+if ($now.Count -ne $routes.Count -or $bad.Count -gt 0) {
+    throw ("Switching to {0} failed: {1} of {2} route(s) still on another interface. Configuration NOT saved." -f $target, $bad.Count, $routes.Count)
+}
+[void](Send-Rci @('system configuration save'))
+Write-Host ("Done, {0} route(s) switched to {1}, configuration saved." -f $now.Count, $target)
+}
+
 # --- run ---
 $failed = @()
 foreach ($ip in $targets) {
     Write-Host ''
     Write-Host ("=== {0} ===" -f $ip)
-    try { Install-ToRouter -ip $ip -login $login -pass $pass }
+    try {
+        if ($mode -eq 'switch') { Switch-ToReserve -ip $ip -login $login -pass $pass -preferred $reserveIfaceName }
+        else { Install-ToRouter -ip $ip -login $login -pass $pass }
+    }
     catch {
         Write-Warning ("[{0}] {1}" -f $ip, $_.Exception.Message)
         $failed += $ip
     }
 }
 if ($failed.Count -gt 0) { throw ("Failed on: {0}" -f ($failed -join ', ')) }
-Write-Host ("All done, configuration saved on: {0}" -f ($targets -join ', '))
+if ($mode -eq 'switch') { Write-Host ("All done, list routes switched on: {0}" -f ($targets -join ', ')) }
+else { Write-Host ("All done, configuration saved on: {0}" -f ($targets -join ', ')) }

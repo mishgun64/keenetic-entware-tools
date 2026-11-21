@@ -186,91 +186,145 @@ function Get-GroupRoutes {
     return $routes
 }
 
-# Removes every route of one group. Removal spelling differs between KeeneticOS builds,
-# so several variants are tried and success is judged by re-reading the config.
+# Error messages of an RCI batch (empty when every command was accepted).
+function Get-RciErrors($res) {
+    $msgs = @()
+    foreach ($r in @($res)) {
+        foreach ($s in @($r.parse.status)) {
+            if ($s.status -eq 'error') { $msgs += [string]$s.message }
+        }
+    }
+    return @($msgs)
+}
+
+# Removes every route of one group. The accepted spelling differs between KeeneticOS
+# builds, so several forms are tried and success is judged by re-reading the config.
 function Remove-GroupRoutes([string]$Group) {
     $cur = @(Get-GroupRoutes | Where-Object { $_.Group -eq $Group })
     if ($cur.Count -eq 0) { return $true }
+
+    $forms = @()
+    foreach ($r in $cur) {
+        $forms += "no $($r.Cmd)"
+        $iface = $null
+        if ($r.Cmd -match '^route\s+object-group\s+\S+\s+(\S+)') { $iface = $Matches[1] }
+        if ($iface) {
+            $forms += "no route object-group $Group $iface"
+            $forms += "no route object-group $Group $iface auto"
+        }
+    }
+    $forms += "no route object-group $Group"
+    $forms = @($forms | Select-Object -Unique)
+
     $variants = @()
-    $variants += ,(@('dns-proxy') + @($cur | ForEach-Object { "no $($_.Cmd)" }) + @('exit'))
-    $variants += ,@('dns-proxy', "no route object-group $Group", 'exit')
-    $variants += ,@("no route object-group $Group")
+    foreach ($f in $forms) {
+        $variants += ,@('dns-proxy', $f, 'exit')
+        $variants += ,@("dns-proxy $f")
+        $variants += ,@($f)
+    }
+
+    $msgs = @()
     foreach ($v in $variants) {
-        $null = Invoke-Rci $v
+        $msgs += @(Get-RciErrors (Invoke-Rci $v))
         if (@(Get-GroupRoutes | Where-Object { $_.Group -eq $Group }).Count -eq 0) { return $true }
+    }
+    $msgs = @($msgs | Where-Object { $_ } | Select-Object -Unique)
+    if ($msgs.Count -gt 0) {
+        Write-Warning ("route {0}: router said: {1}" -f $Group, (($msgs | Select-Object -First 3) -join '; '))
     }
     return $false
 }
 
-# Makes the route of one group point to <Interface> and match the requested state.
-# A matching route is left untouched, so a rerun does not touch the router.
-# A differing route is removed and re-added at the end of the block, because only
-# the last route can be addressed by "route disable".
-function Set-GroupRoute([string]$Group, [string]$Interface, [bool]$Disable) {
-    $want = "route object-group $Group $Interface auto"
-    $cur = @(Get-GroupRoutes | Where-Object { $_.Group -eq $Group })
-    if ($cur.Count -eq 1 -and $cur[0].Cmd -eq $want -and [bool]$cur[0].Disabled -eq $Disable) { return 0 }
-
-    $errors = 0
-    for ($attempt = 1; $attempt -le 2; $attempt++) {
-        if (-not (Remove-GroupRoutes $Group)) {
-            Write-Warning ("route {0}: could not remove the old route" -f $Group)
-            return ($errors + 1)
+# Rebuilds dns-proxy without the routes of the given groups. Fallback for builds where
+# the CLI refuses to remove a dns-proxy route: the rest of the block (upstreams,
+# rebind-protect, filter, other routes) is kept.
+function Rebuild-DnsProxy([string[]]$DropGroups) {
+    $cfg = Invoke-RestMethod "$base/rci/show/running-config" -WebSession $sess
+    $keep = @()
+    $in = $false
+    $dropNext = $false
+    foreach ($line in $cfg.message) {
+        if ($line -match '^\S') { $in = ($line -match '^dns-proxy\s*$'); $dropNext = $false; continue }
+        if (-not $in) { continue }
+        $t = $line.Trim()
+        if ($t -eq '!') { continue }
+        if ($t -match '^route\s+object-group\s+(\S+)') {
+            $g = $Matches[1]
+            if ($DropGroups -contains $g) { $dropNext = $true; continue }
         }
-        $cmds = @('dns-proxy', $want)
-        if ($Disable) { $cmds += 'route disable' }
-        $cmds += 'exit'
-        $errors += Send-Rci $cmds
-
-        $now = @(Get-GroupRoutes | Where-Object { $_.Group -eq $Group })
-        if ($now.Count -eq 1 -and $now[0].Cmd -eq $want -and [bool]$now[0].Disabled -eq $Disable) { return $errors }
-        if ($attempt -lt 2) {
-            Write-Warning ("route {0}: {1} entr(ies) after update (disabled={2}), retrying" -f `
-                $Group, $now.Count, (($now | ForEach-Object { $_.Disabled }) -join ','))
-        }
+        if ($dropNext -and $t -eq 'route disable') { $dropNext = $false; continue }
+        $dropNext = $false
+        $keep += $t
     }
-    Write-Warning ("route {0}: could not set state (disabled={1})" -f $Group, $Disable)
-    return ($errors + 1)
+    $null = Invoke-Rci @('no dns-proxy')
+    if ($keep.Count -gt 0) { $null = Invoke-Rci (@('dns-proxy') + $keep + @('exit')) }
 }
 
-# Removes every group created by this script (domain-listN) together with its route,
-# so the install always starts from scratch: domains removed from a file disappear,
-# and no stale groups/routes stay behind. Other object-groups are not touched.
-function Reset-DomainLists {
-    $names = @()
+function Get-DomainListGroups {
     $cfg = Invoke-RestMethod "$base/rci/show/running-config" -WebSession $sess
+    $names = @()
     foreach ($line in $cfg.message) {
         if ($line -match '^\s*object-group\s+fqdn\s+(\S+)') {
             $n = $Matches[1]
             if ($n -match '^domain-list\d+$') { $names += $n }
         }
     }
-    $names = @($names | Sort-Object -Unique)
-    if ($names.Count -eq 0) {
+    return @($names | Sort-Object -Unique)
+}
+
+# Removes every group created by this script (domain-listN) together with its route,
+# so the install always starts from scratch: domains removed from a file disappear,
+# and no stale groups/routes stay behind. Other object-groups are not touched.
+function Reset-DomainLists {
+    $groups = @(Get-DomainListGroups)
+    # route lines of domain-list groups, even when the group itself is already gone
+    $stale = @(Get-GroupRoutes | Where-Object { $_.Group -match '^domain-list\d+$' })
+    if ($groups.Count -eq 0 -and $stale.Count -eq 0) {
         Write-Host 'No old domain-list groups on the router.'
         return
     }
 
-    Write-Host ("Removing {0} old group(s) and their routes: {1}" -f $names.Count, ($names -join ', '))
-    # routes first: a route pointing to a deleted group must not remain
-    foreach ($n in $names) {
-        if (@(Get-GroupRoutes | Where-Object { $_.Group -eq $n }).Count -eq 0) { continue }
-        if (-not (Remove-GroupRoutes $n)) {
-            throw ("Could not remove the route of {0}, aborting. Configuration NOT saved." -f $n)
+    # 1) delete the groups; routes left behind are cleaned up below
+    if ($groups.Count -gt 0) {
+        Write-Host ("Removing {0} old group(s): {1}" -f $groups.Count, ($groups -join ', '))
+        $null = Invoke-Rci @($groups | ForEach-Object { "no object-group fqdn $_" })
+
+        # 2) groups still in use by a route: remove those routes, then retry
+        $left = @(Get-DomainListGroups)
+        if ($left.Count -gt 0) {
+            Write-Host ("  {0} group(s) still in use, removing their routes..." -f $left.Count)
+            $failed = $false
+            foreach ($n in $left) {
+                if (-not (Remove-GroupRoutes $n)) { $failed = $true; break }
+            }
+            if (-not $failed) {
+                $null = Invoke-Rci @($left | ForEach-Object { "no object-group fqdn $_" })
+            }
         }
     }
-    $null = Invoke-Rci @($names | ForEach-Object { "no object-group fqdn $_" })
 
-    $left = @()
-    $cfg = Invoke-RestMethod "$base/rci/show/running-config" -WebSession $sess
-    foreach ($line in $cfg.message) {
-        if ($line -match '^\s*object-group\s+fqdn\s+(\S+)') {
-            $n = $Matches[1]
-            if ($n -match '^domain-list\d+$') { $left += $n }
+    # 3) routes the CLI refused to delete (or that outlived their group):
+    #    rebuild dns-proxy without them
+    $stale = @(Get-GroupRoutes | Where-Object { $_.Group -match '^domain-list\d+$' })
+    if ($stale.Count -gt 0) {
+        Write-Host ("  {0} stale route(s) left, rebuilding dns-proxy" -f $stale.Count)
+        Rebuild-DnsProxy @($stale | ForEach-Object { $_.Group })
+        $stale = @(Get-GroupRoutes | Where-Object { $_.Group -match '^domain-list\d+$' })
+        if ($stale.Count -gt 0) {
+            throw ("Could not remove route(s) of: {0}, aborting. Configuration NOT saved." -f `
+                (($stale | ForEach-Object { $_.Group } | Sort-Object -Unique) -join ', '))
         }
+    }
+
+    # 4) retry the groups (the routes are gone now)
+    $left = @(Get-DomainListGroups)
+    if ($left.Count -gt 0) {
+        Write-Host ("  retrying {0} group(s)" -f $left.Count)
+        $null = Invoke-Rci @($left | ForEach-Object { "no object-group fqdn $_" })
+        $left = @(Get-DomainListGroups)
     }
     if ($left.Count -gt 0) {
-        throw ("Could not remove group(s): {0}, aborting. Configuration NOT saved." -f (($left | Sort-Object -Unique) -join ', '))
+        throw ("Could not remove group(s): {0}, aborting. Configuration NOT saved." -f ($left -join ', '))
     }
     Write-Host '  ok'
 }

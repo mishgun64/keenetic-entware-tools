@@ -3,6 +3,10 @@ $ErrorActionPreference = 'Stop'
 
 [Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12
 
+# shown at start so that a stale (cached) copy is easy to spot
+$ScriptVersion = 'v4'
+Write-Host ("add-domain-lists {0}" -f $ScriptVersion)
+
 # lists are downloaded from this folder of the GitHub repo
 $ListsApi = 'https://api.github.com/repos/mishgun64/keenetic-entware-tools/contents/domain-lists?ref=main'
 

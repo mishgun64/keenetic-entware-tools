@@ -52,10 +52,12 @@ sh -c "$(curl -fsSL https://github.com/mishgun64/keenetic-entware-tools/raw/refs
 Запуск без скачивания файла (из любой папки):
 
 ```powershell
-& ([scriptblock]::Create((irm https://github.com/mishgun64/keenetic-entware-tools/raw/refs/heads/main/add-domain-lists.ps1)))
+& ([scriptblock]::Create((irm ("https://github.com/mishgun64/keenetic-entware-tools/raw/refs/heads/main/add-domain-lists.ps1?nocache={0}" -f [DateTime]::Now.Ticks))))
 ```
 
 Скрипт, выполняемый из памяти, не блокируется политикой выполнения PowerShell. Списки берутся прямо из репозитория (ветка `main`, через GitHub API), локальная папка `domain-lists` не нужна. Репозиторий должен быть публичным, а у GitHub API без токена лимит 60 запросов в час на IP.
+
+Параметр `?nocache=…` обязателен: GitHub отдаёт `raw` с кэшем, и без него можно получить устаревшую копию скрипта. Первая строка вывода (`add-domain-lists vN`) показывает версию — если она не совпадает с последней в репозитории, кэш всё ещё отдаёт старое, повторите запуск.
 
 Что спрашивает скрипт:
 

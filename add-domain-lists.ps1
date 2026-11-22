@@ -4,7 +4,7 @@ $ErrorActionPreference = 'Stop'
 [Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12
 
 # shown at start so that a stale (cached) copy is easy to spot
-$ScriptVersion = 'v5'
+$ScriptVersion = 'v6'
 Write-Host ("add-domain-lists {0}" -f $ScriptVersion)
 
 # lists are downloaded from this folder of the GitHub repo
@@ -239,6 +239,56 @@ function Rebuild-DnsProxy([string[]]$DropGroups) {
     }
     $null = Invoke-Rci @('no dns-proxy')
     if ($keep.Count -gt 0) { $null = Invoke-Rci (@('dns-proxy') + $keep + @('exit')) }
+}
+
+# Reads object-group fqdn blocks (description + includes) so that a group can be
+# re-created without downloading the lists again.
+function Get-GroupBlocks {
+    $cfg = Invoke-RestMethod "$base/rci/show/running-config" -WebSession $sess
+    $list = New-Object System.Collections.ArrayList
+    $cur = $null
+    foreach ($line in $cfg.message) {
+        if ($line -match '^\S') {
+            $cur = $null
+            if ($line -match '^object-group\s+fqdn\s+(\S+)') {
+                $cur = [pscustomobject]@{ Name = $Matches[1]; Description = $null; Includes = @(); Other = @() }
+                [void]$list.Add($cur)
+            }
+            continue
+        }
+        if (-not $cur) { continue }
+        $t = $line.Trim()
+        if ($t -eq '!') { $cur = $null; continue }
+        if ($t -match '^description\s+(.+)$') { $cur.Description = $Matches[1] }
+        elseif ($t -match '^include\s+(\S+)$') { $cur.Includes += $Matches[1] }
+        else { $cur.Other += $t }
+    }
+    return $list
+}
+
+# Re-creates groups from blocks read by Get-GroupBlocks. Returns the number of failed
+# commands. Includes are sent in chunks (same limit as the install path).
+function Restore-GroupBlocks($Blocks) {
+    $errors = 0
+    foreach ($g in @($Blocks)) {
+        $includes = @($g.Includes)
+        if ($includes.Count -eq 0) {
+            $cmds = @("object-group fqdn $($g.Name)")
+            if ($g.Description) { $cmds += "description $($g.Description)" }
+            $cmds += 'exit'
+            $errors += Send-Rci $cmds
+            continue
+        }
+        for ($i = 0; $i -lt $includes.Count; $i += 80) {
+            $slice = $includes[$i..([Math]::Min($i + 79, $includes.Count - 1))]
+            $cmds = @("object-group fqdn $($g.Name)")
+            if ($i -eq 0 -and $g.Description) { $cmds += "description $($g.Description)" }
+            $cmds += @($slice | ForEach-Object { "include $_" })
+            $cmds += 'exit'
+            $errors += Send-Rci $cmds
+        }
+    }
+    return $errors
 }
 
 function Get-DomainListGroups {
@@ -756,55 +806,125 @@ if ($ifaces.Count -gt 0 -and -not $ifaces.ContainsKey($target)) {
     Write-Warning ("Interface {0} is not in the router interface list, trying anyway" -f $target)
 }
 
-# --- rewrite the route lines of the lists ---
-$cfg = Invoke-RestMethod "$base/rci/show/running-config" -WebSession $sess
-$keep = @()
-$in = $false
-$changed = 0
-foreach ($line in $cfg.message) {
-    if ($line -match '^\S') { $in = ($line -match '^dns-proxy\s*$'); continue }
-    if (-not $in) { continue }
-    $t = $line.Trim()
-    if ($t -eq '!') { continue }
-    if ($t -match '^route\s+object-group\s+(\S+)\s+(\S+)(.*)$') {
-        $g = $Matches[1]
-        $oldIface = $Matches[2]
-        # keep the trailing part (usually " auto"); note that any later -match
-        # overwrites $Matches, so it is copied first
-        $suffix = $Matches[3]
-        if ($g -match '^domain-list\d+$') {
-            $newLine = "route object-group $g $target" + $suffix
-            if ($t -ne $newLine) {
-                Write-Host ("  {0}: {1} -> {2}" -f $g, $oldIface, $target)
-                $changed++
-            }
-            $t = $newLine
-        }
-    }
-    $keep += $t
+# --- plan: which groups change, and their enabled/disabled state ---
+$state = @{}
+foreach ($r in $routes) {
+    if ($state.ContainsKey($r.Group)) { $state[$r.Group] = ([bool]$state[$r.Group] -or [bool]$r.Disabled) }
+    else { $state[$r.Group] = [bool]$r.Disabled }
 }
 
-if ($changed -eq 0) {
+$changes = @()
+foreach ($g in @($state.Keys | Sort-Object)) {
+    $ifcs = @($routes | Where-Object { $_.Group -eq $g } | ForEach-Object {
+        if ($_.Cmd -match '^route\s+object-group\s+\S+\s+(\S+)') { $Matches[1] }
+    } | Sort-Object -Unique)
+    $dup = (@($routes | Where-Object { $_.Group -eq $g }).Count -gt 1)
+    if (@($ifcs | Where-Object { $_ -ne $target }).Count -eq 0 -and -not $dup) { continue }
+    $changes += $g
+    $note = ''
+    if ($state[$g]) { $note += '  (disabled)' }
+    if ($dup) { $note += '  (duplicate routes)' }
+    Write-Host ("  {0}: {1} -> {2}{3}" -f $g, (($ifcs) -join ','), $target, $note)
+}
+
+if ($changes.Count -eq 0) {
     Write-Host ("All list routes already use {0}, nothing to change." -f $target)
     Write-Host 'Configuration NOT saved (no changes).'
     return
 }
 
-Write-Host ("Switching {0} route(s) to {1}..." -f $changed, $target)
-$null = Invoke-Rci @('no dns-proxy')
-if ($keep.Count -gt 0) {
-    $res = Invoke-Rci (@('dns-proxy') + $keep + @('exit'))
-    $errs = @(Get-RciErrors $res)
-    if ($errs.Count -gt 0) {
-        throw ("Rebuilding dns-proxy failed: {0}. Configuration NOT saved." -f (($errs | Select-Object -Unique | Select-Object -First 3) -join '; '))
+Write-Host ("Switching {0} route(s) to {1}..." -f $changes.Count, $target)
+
+# Some builds accept "no route object-group ..." and the routes can be moved one by
+# one. That is probed on a single group first; if it is refused, the groups are
+# deleted and re-created (deleting an object-group also removes its routes), which
+# only relies on commands every build supports.
+$probe = $changes[0]
+$null = Set-GroupRoute -Group $probe -Interface $target -Disable ([bool]$state[$probe]) 3>$null
+$probeNow = @(Get-GroupRoutes | Where-Object { $_.Group -eq $probe })
+$fastPath = ($probeNow.Count -eq 1 -and $probeNow[0].Cmd -eq "route object-group $probe $target auto")
+
+if ($fastPath) {
+    Write-Host '  per-route update is supported, moving routes one by one'
+    foreach ($g in ($changes | Where-Object { $_ -ne $probe })) {
+        $e = Set-GroupRoute -Group $g -Interface $target -Disable ([bool]$state[$g]) 3>$null
+        if ($e -ne 0) { throw ("Could not switch route {0} to {1}, aborting. Configuration NOT saved." -f $g, $target) }
+    }
+}
+else {
+    Write-Host '  per-route update is refused by this firmware, re-creating groups'
+
+    $blocks = @(Get-GroupBlocks | Where-Object { $changes -contains $_.Name })
+    $weird = @($blocks | Where-Object { $_.Other.Count -gt 0 })
+    if ($weird.Count -gt 0) {
+        throw ("Group(s) {0} contain unsupported lines, refusing to re-create them. Configuration NOT saved." -f `
+            (($weird | ForEach-Object { $_.Name }) -join ', '))
+    }
+    if ($blocks.Count -ne $changes.Count) {
+        Write-Warning ("{0} group(s) have a route but no object-group on the router" -f ($changes.Count - $blocks.Count))
+    }
+
+    # 1) delete the groups (their routes disappear with them)
+    Write-Host ("  deleting {0} group(s)" -f $blocks.Count)
+    $errors = Send-Rci @($blocks | ForEach-Object { "no object-group fqdn $($_.Name)" })
+    $left = @(Get-DomainListGroups)
+    $leftChanged = @($blocks | Where-Object { $left -contains $_.Name })
+    if ($leftChanged.Count -gt 0) {
+        throw ("Could not delete group(s): {0}, aborting. Configuration NOT saved." -f `
+            (($leftChanged | ForEach-Object { $_.Name }) -join ', '))
+    }
+
+    # 1b) routes the deleted groups left behind must go too, otherwise the new
+    #     routes would be added next to them
+    $stale = @(Get-GroupRoutes | Where-Object { $changes -contains $_.Group })
+    if ($stale.Count -gt 0) {
+        Write-Host ("  removing {0} leftover route(s)" -f $stale.Count)
+        foreach ($g in @($stale | ForEach-Object { $_.Group } | Sort-Object -Unique)) {
+            $null = Remove-GroupRoutes $g 3>$null
+        }
+        $stale = @(Get-GroupRoutes | Where-Object { $changes -contains $_.Group })
+        if ($stale.Count -gt 0) {
+            Write-Host '  routes cannot be removed, restoring the deleted groups'
+            $null = Restore-GroupBlocks $blocks
+            throw ("Could not remove leftover route(s) of: {0}. Groups restored, configuration NOT saved." -f `
+                (($stale | ForEach-Object { $_.Group } | Sort-Object -Unique) -join ', '))
+        }
+    }
+
+    # 2) re-create the groups with the same description and includes
+    Write-Host ("  re-creating {0} group(s)" -f $blocks.Count)
+    $errors += Restore-GroupBlocks $blocks
+
+    # 3) add the routes on the target interface, keeping "route disable"
+    $cmds = @('dns-proxy')
+    foreach ($g in $changes) {
+        $cmds += "route object-group $g $target auto"
+        if ($state[$g]) { $cmds += 'route disable' }
+    }
+    $cmds += 'exit'
+    $errors += Send-Rci $cmds
+    if ($errors -gt 0) { throw "Switching routes failed, aborting. Configuration NOT saved." }
+
+    # 4) the groups must be back with the same number of entries
+    $nowBlocks = @(Get-GroupBlocks)
+    $lost = @()
+    foreach ($g in $blocks) {
+        $have = @($nowBlocks | Where-Object { $_.Name -eq $g.Name })
+        if ($have.Count -ne 1 -or @($have[0].Includes).Count -ne @($g.Includes).Count) { $lost += $g.Name }
+    }
+    if ($lost.Count -gt 0) {
+        throw ("Group(s) not restored: {0}, aborting. Configuration NOT saved." -f ($lost -join ', '))
     }
 }
 
-# --- verify: same count, every route on the target interface ---
+# --- verify: every list route on the target, one route per group, state kept ---
 $now = @(Get-GroupRoutes | Where-Object { $_.Group -match '^domain-list\d+$' })
 $bad = @($now | Where-Object { $_.Cmd -notmatch ('^route\s+object-group\s+' + [regex]::Escape($_.Group) + '\s+' + [regex]::Escape($target) + '(\s|$)') })
-if ($now.Count -ne $routes.Count -or $bad.Count -gt 0) {
-    throw ("Switching to {0} failed: {1} of {2} route(s) still on another interface. Configuration NOT saved." -f $target, $bad.Count, $routes.Count)
+$dup = @($now | Group-Object Group | Where-Object { $_.Count -ne 1 })
+$disBad = @($now | Where-Object { $changes -contains $_.Group -and [bool]$_.Disabled -ne [bool]$state[$_.Group] })
+if ($bad.Count -gt 0 -or $dup.Count -gt 0 -or $disBad.Count -gt 0) {
+    throw ("Switching to {0} failed: {1} off target, {2} duplicated, {3} with wrong state. Configuration NOT saved." -f `
+        $target, $bad.Count, $dup.Count, $disBad.Count)
 }
 [void](Send-Rci @('system configuration save'))
 Write-Host ("Done, {0} route(s) switched to {1}, configuration saved." -f $now.Count, $target)

@@ -23,7 +23,7 @@ sudo bash -c "$(curl -fsSL https://github.com/mishgun64/keenetic-entware-tools/r
 
 Скрипт скачивает `aarch64-installer.tar.gz` до форматирования, показывает `lsblk` и требует ввести имя устройства для подтверждения. Результат: ext4-раздел с меткой `ENTWARE` и файлом `/install/aarch64-installer.tar.gz`.
 
-## 2. Первичная настройка роутера
+## 2. Первичная настройка Entware
 
 Заходишь на роутер по SSH, ставишь curl и запускаешь:
 
